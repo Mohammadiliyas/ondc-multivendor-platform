@@ -1,60 +1,37 @@
 # ONDC-Integrated Multi-Vendor E-Commerce Platform
 
-Django + Django REST Framework MVP for a multi-vendor seller platform, with role-based access, vendor approval, inventory, order workflows, a responsive storefront, and a clearly marked **mock ONDC adapter**.
+Django starter scaffold for a multi-vendor marketplace with a product catalog and a clearly marked **mock ONDC catalog adapter**.
 
-The requested primary database is MySQL. SQLite remains the default for a zero-setup local smoke run; set the `MYSQL_*` environment variables to use MySQL.
+> **Development status:** This repository is an initial scaffold, not a complete or production-ready marketplace. Full authentication/role enforcement, vendor CRUD workflows, order checkout, payment/logistics integrations, production ONDC signing/callbacks, and production deployment still need implementation and verification.
 
-## Included
-- Buyer, Vendor, Platform Admin roles
-- JWT access/refresh token endpoints
-- Vendor registration/profile approval workflow
-- Vendor-isolated product management and searchable public catalog
-- Stock-aware order creation in a database transaction
-- Order status updates and role-filtered order visibility
-- Internal catalog mapping and mock ONDC callback endpoints
-- Django Admin, tests, Dockerfile, and Render Blueprint
+## Technology
+- Python / Django
+- Django REST Framework dependencies included for API expansion
+- MySQL when `MYSQL_DATABASE` is configured; SQLite otherwise for local development
+- Django Admin
+- GitHub Actions CI scaffold
 
-## Run locally
-1. Install Python 3.12+ and (for MySQL) a MySQL 8.x server plus the build prerequisites required by `mysqlclient`.
+## Quick start
+1. Install Python 3.12+.
 2. Create and activate a virtual environment.
-3. `pip install -r requirements.txt`
-4. `cp .env.example .env` (Windows: `copy .env.example .env`). Change `DJANGO_SECRET_KEY` and configure `MYSQL_*` values if using MySQL. If no MySQL variables are set, local development uses SQLite.
-5. `python manage.py migrate`
-6. `python manage.py createsuperuser`
-7. `python manage.py runserver`
+3. Install dependencies: `pip install -r requirements.txt`
+4. Copy `.env.example` to `.env`; change the secret and configure database variables.
+5. Run `python manage.py migrate`
+6. Create an admin user: `python manage.py createsuperuser`
+7. Start the server: `python manage.py runserver`
 
-API base: `http://127.0.0.1:8000/api/`
+## Current endpoints
+- `GET /api/health/` — health check
+- `GET /api/catalog/` — active products from approved vendors; optional `?search=term`
+- `GET /api/ondc/catalog/` — development-only mock ONDC-style catalog mapping
 
-## Main endpoints
-- `GET /api/health/`
-- `POST /api/auth/register/`
-- `POST /api/token/` and `POST /api/token/refresh/`
-- `GET /api/categories/`
-- `GET /api/products/?search=phone&category=Electronics`
-- `POST /api/vendors/`
-- `POST /api/admin/vendors/{id}/approve/` and `/suspend/`
-- `POST /api/products/`
-- `POST /api/orders/create/`
-- `GET /api/orders/`
-- `POST /api/orders/{id}/status/`
-- `GET /api/ondc/catalog/`
-- Mock callback endpoints: `/api/ondc/on_search/`, `on_select/`, `on_init/`, `on_confirm/`, `on_status/`, `on_cancel/`
+Django Admin is available at `/admin/`.
 
-For authenticated requests use `Authorization: Bearer <access_token>`.
+## Environment variables
+See `.env.example`. If `MYSQL_DATABASE` is set, configure the matching MySQL host, port, user, password and database. If it is unset, SQLite is used.
 
-## Test
-`python manage.py test`
+## ONDC status
+The ONDC catalog endpoint is only a mock adapter for development. It does **not** establish live ONDC connectivity or conformance. Production participation requires choosing the relevant ONDC domain and participant role, onboarding and subscriber identity, implementing current Beckn/ONDC protocol requirements, signing and verification, callbacks, observability, and conformance testing.
 
-## Important limitations before production
-This is an API-first functional MVP scaffold, not a certified ONDC network participant. ONDC production participation requires network onboarding/registry details, subscriber IDs, Beckn protocol compliance, cryptographic signing and verification, callbacks, logs, and conformance testing. Payment gateway, logistics integration, email/SMS, and real ONDC credentials are not configured. Multi-vendor parent-order status changes are admin-only until per-vendor shipment workflows are implemented. Do not use mock callback endpoints as a production ONDC integration.
-
-Before deployment set a strong secret, correct `ALLOWED_HOSTS`, production database, HTTPS, backups, logging, and security review.
-
-## API documentation
-- Swagger UI: `/api/docs/`
-- OpenAPI schema: `/api/schema/`
-- Postman collection: `postman_collection.json`
-- Architecture: `docs/architecture.md`
-
-## Verification status
-Python syntax and storefront JavaScript syntax were checked in the build environment. Django runtime checks and automated tests have not yet been run because Django dependencies could not be downloaded in that environment.
+## Verification
+GitHub Actions is configured to install dependencies and run Django checks and tests. The checks have not yet been confirmed passing. Validate the project in CI before deployment; never commit real credentials or production secrets.
