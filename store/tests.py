@@ -163,3 +163,35 @@ class MarketplaceAPITests(TestCase):
         self.assertEqual(updated.status_code, 200)
         order = Order.objects.get(pk=order_id)
         self.assertEqual(order.status, Order.Status.CONFIRMED)
+
+
+    def test_buyer_cannot_cancel_after_vendor_has_started_packing(self):
+        self.auth(self.buyer)
+        response = self.client.post('/api/orders/create/', {
+            'shipping_address':'12 Main Road, Hyderabad',
+            'idempotency_key':'no-cancel-after-pack',
+            'items':[{'product_id':self.product.pk,'quantity':1}]
+        }, format='json')
+        fulfillment = VendorFulfillment.objects.get(order_id=response.data['id'], vendor=self.vendor)
+        fulfillment.status = VendorFulfillment.Status.PACKED
+        fulfillment.save(update_fields=['status'])
+        denied = self.client.post(f'/api/orders/{response.data["id"]}/cancel/')
+        self.assertEqual(denied.status_code, 409)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 4)
+
+    def test_admin_cannot_cancel_after_vendor_has_started_shipping(self):
+        self.auth(self.buyer)
+        response = self.client.post('/api/orders/create/', {
+            'shipping_address':'12 Main Road, Hyderabad',
+            'idempotency_key':'admin-no-cancel-after-ship',
+            'items':[{'product_id':self.product.pk,'quantity':1}]
+        }, format='json')
+        fulfillment = VendorFulfillment.objects.get(order_id=response.data['id'], vendor=self.vendor)
+        fulfillment.status = VendorFulfillment.Status.SHIPPED
+        fulfillment.save(update_fields=['status'])
+        self.auth(self.admin)
+        denied = self.client.patch(f'/api/admin/orders/{response.data["id"]}/status/', {'status':'CANCELLED'}, format='json')
+        self.assertEqual(denied.status_code, 409)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 4)
