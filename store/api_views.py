@@ -97,13 +97,13 @@ class VendorDashboardView(APIView):
         })
 
 class VendorOrderListView(generics.ListAPIView):
-    serializer_class = OrderSerializer
+    serializer_class = VendorFulfillmentSerializer
     permission_classes = [IsAuthenticated]
     def get_queryset(self):
         vendor = getattr(self.request.user, 'vendor_profile', None)
-        if not vendor:
-            raise PermissionDenied('Vendor account required.')
-        return Order.objects.filter(items__product__vendor=vendor).distinct().prefetch_related('items').order_by('-created_at')
+        if not vendor or vendor.is_suspended or not vendor.is_approved:
+            raise PermissionDenied('An approved, active vendor account is required.')
+        return VendorFulfillment.objects.filter(vendor=vendor).select_related('order','order__buyer','vendor').prefetch_related('order__items').order_by('-created_at')
 
 class OrderCreateView(APIView):
     permission_classes = [IsAuthenticated]
