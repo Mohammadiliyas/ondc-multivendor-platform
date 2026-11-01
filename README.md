@@ -2,7 +2,7 @@
 
 A Django REST Framework marketplace prototype with buyer shopping, vendor onboarding, platform administration, split vendor fulfilment, and a development-only ONDC/Beckn adapter.
 
-> **Status:** Active development. Core buyer/vendor/admin workflows and split fulfilment are implemented. Payment processing, production-grade deployment hardening, live ONDC network connectivity, and ONDC conformance are not yet complete. Passing CI does not mean production readiness.
+> **Status:** Active development. Core buyer/vendor/admin workflows and split fulfilment are implemented. Razorpay test-mode checkout and UPI-enabled Checkout flow are implemented in code; live merchant credentials and webhook configuration are still required. Production payment/refund operations, deployment hardening, live ONDC network connectivity, and ONDC conformance are not yet complete. Passing CI does not mean production readiness.
 
 ## Technology
 
@@ -50,6 +50,9 @@ If `MYSQL_DATABASE` is set, Django uses MySQL. Otherwise it uses SQLite.
 | `/api/dashboard/vendor/` | Vendor dashboard metrics |
 | `/api/orders/create/` | Buyer checkout |
 | `/api/orders/` | Buyer order history (staff can inspect all) |
+| `/api/orders/<id>/payments/razorpay/` | Create/reuse Razorpay payment order |
+| `/api/payments/razorpay/verify/` | Verify Checkout signature and fetch gateway status |
+| `/api/payments/razorpay/webhook/` | Receive signed Razorpay webhook events |
 | `/api/orders/<id>/cancel/` | Buyer/admin cancellation under fulfilment rules |
 | `/api/vendor/fulfillments/` | Vendor-specific fulfilment list |
 | `/api/vendor/fulfillments/<id>/status/` | Update own fulfilment and tracking reference |
@@ -66,10 +69,18 @@ If `MYSQL_DATABASE` is set, Django uses MySQL. Otherwise it uses SQLite.
 - Vendors cannot access another vendor's fulfilment or update another vendor's status.
 - Parent order status advances as vendor fulfilments progress.
 - Buyer/admin cancellation restores stock only before any vendor has started packing or shipping.
+- Vendor fulfilment is locked until a captured payment is verified.
+- Captured/authorized payments cannot be cancelled until a refund or reversal flow is completed.
 
 ## Payments and external services
 
-The current checkout does **not** collect money. It creates a marketplace order only. Payment gateway integration must be configured separately with a merchant account, verified webhook signatures, idempotency, refund handling, and reconciliation. Never store card details in this application.
+Razorpay Checkout is wired for INR with UPI, cards, net banking and wallets enabled where the merchant account and gateway support them. The server calculates the order amount, creates/reuses a Razorpay order, verifies the Checkout signature, fetches payment state from Razorpay, and accepts signed, idempotent webhook events. Vendor fulfilment is blocked until payment is captured. The integration is **not live until you add your own Razorpay test credentials** to the deployment environment and configure the webhook URL.
+
+Set `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`, and `RAZORPAY_CURRENCY=INR` from the Razorpay dashboard. For development, use test-mode credentials only. Configure the webhook endpoint as `https://YOUR-DOMAIN/api/payments/razorpay/webhook/` and subscribe to `payment.captured`, `payment.failed`, and `order.paid`. Use the exact webhook secret configured in Razorpay. Never put the key secret or webhook secret in frontend code or commit them to Git.
+
+UPI availability depends on UPI being activated for your Razorpay merchant account and the methods enabled by Razorpay. Checkout can offer UPI intent/app selection and QR where available. The application does not generate a direct UPI ID or bypass the payment gateway.
+
+Refund API orchestration, vendor settlement/split payouts, payment reconciliation dashboards, and production incident handling remain future work. Never store card details in this application.
 
 Analytics/error monitoring can be added through an application SDK and server-side configuration. Connecting an assistant plugin does not automatically install that SDK into this Django application.
 
