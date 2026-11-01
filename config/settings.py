@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 import dj_database_url
+from datetime import timedelta
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / '.env')
@@ -46,7 +47,7 @@ REST_FRAMEWORK={
     'DEFAULT_PERMISSION_CLASSES':['rest_framework.permissions.IsAuthenticatedOrReadOnly'],
     'DEFAULT_AUTHENTICATION_CLASSES':['rest_framework_simplejwt.authentication.JWTAuthentication'],
 }
-SIMPLE_JWT={'ACCESS_TOKEN_LIFETIME':__import__('datetime').timedelta(minutes=30),'REFRESH_TOKEN_LIFETIME':__import__('datetime').timedelta(days=1)}
+SIMPLE_JWT={'ACCESS_TOKEN_LIFETIME':timedelta(minutes=30),'REFRESH_TOKEN_LIFETIME':timedelta(days=1),'TOKEN_OBTAIN_SERIALIZER':'store.auth.VerifiedTokenObtainPairSerializer'}
 SPECTACULAR_SETTINGS={'TITLE':'ONDC Multi-Vendor Marketplace API','DESCRIPTION':'Marketplace API and mock ONDC adapter; not production ONDC certification.','VERSION':'0.1.0'}
 SECURE_CONTENT_TYPE_NOSNIFF = True
 X_FRAME_OPTIONS = 'DENY'
@@ -68,3 +69,24 @@ if os.getenv('RENDER'):
     SECURE_REFERRER_POLICY = 'same-origin'
 
 STORAGES = {'default': {'BACKEND':'django.core.files.storage.FileSystemStorage'}, 'staticfiles': {'BACKEND':'whitenoise.storage.CompressedManifestStaticFilesStorage'}}
+
+# Signup verification providers. Both channels are required before activation.
+OTP_EXPIRY_MINUTES = int(os.getenv('OTP_EXPIRY_MINUTES', '5'))
+OTP_RESEND_SECONDS = int(os.getenv('OTP_RESEND_SECONDS', '60'))
+OTP_MAX_ATTEMPTS = int(os.getenv('OTP_MAX_ATTEMPTS', '5'))
+EMAIL_BACKEND = os.getenv('EMAIL_BACKEND', 'django.core.mail.backends.smtp.EmailBackend')
+EMAIL_HOST = os.getenv('EMAIL_HOST', '')
+EMAIL_PORT = int(os.getenv('EMAIL_PORT', '587'))
+EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '')
+EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
+EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'true').lower() == 'true'
+DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', EMAIL_HOST_USER or 'no-reply@marketlane.local')
+MSG91_AUTH_KEY = os.getenv('MSG91_AUTH_KEY', '')
+MSG91_TEMPLATE_ID = os.getenv('MSG91_TEMPLATE_ID', '')
+MSG91_SENDER_ID = os.getenv('MSG91_SENDER_ID', '')
+MSG91_OTP_EXPIRY_SECONDS = int(os.getenv('MSG91_OTP_EXPIRY_SECONDS', '300'))
+RAZORPAY_MODE = os.getenv('RAZORPAY_MODE', 'test').lower()
+if RAZORPAY_MODE not in ('test', 'live'):
+    raise RuntimeError('RAZORPAY_MODE must be test or live.')
+if RAZORPAY_MODE == 'test' and RAZORPAY_KEY_ID and not RAZORPAY_KEY_ID.startswith('rzp_test_'):
+    raise RuntimeError('RAZORPAY_MODE=test requires a Razorpay test Key ID (rzp_test_...).')
