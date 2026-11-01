@@ -1,6 +1,6 @@
 from django.contrib.auth.models import User
 from rest_framework import serializers
-from .models import Vendor, Category, Product, Order, OrderItem, VendorFulfillment
+from .models import Vendor, Category, Product, Order, OrderItem, VendorFulfillment, PaymentRecord
 
 class RegisterSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, min_length=8)
@@ -46,12 +46,16 @@ class OrderItemSerializer(serializers.ModelSerializer):
 class OrderSerializer(serializers.ModelSerializer):
     items = OrderItemSerializer(many=True, read_only=True)
     total = serializers.SerializerMethodField()
+    payment_status = serializers.SerializerMethodField()
     class Meta:
         model = Order
-        fields = ('id', 'buyer', 'status', 'shipping_address', 'items', 'total', 'created_at')
+        fields = ('id', 'buyer', 'status', 'shipping_address', 'items', 'total', 'payment_status', 'created_at')
         read_only_fields = fields
     def get_total(self, obj):
         return str(sum((item.unit_price * item.quantity for item in obj.items.all()), start=0))
+    def get_payment_status(self, obj):
+        payment = obj.payments.filter(provider='razorpay').order_by('-created_at').first()
+        return payment.status if payment else 'UNPAID'
 
 
 class VendorFulfillmentSerializer(serializers.ModelSerializer):
