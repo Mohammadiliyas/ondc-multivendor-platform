@@ -510,6 +510,8 @@ class AdminCreateRefundView(APIView):
             return Response({'detail':'Payment not found.'}, status=404)
         if payment.status != PaymentRecord.Status.PAID or not payment.razorpay_payment_id:
             return Response({'detail':'Only captured payments can be refunded.'}, status=409)
+        if payment.order.vendor_settlements.filter(status=VendorSettlement.Status.PAID).exists():
+            return Response({'detail':'A vendor settlement has already been paid. Reconcile vendor recovery before issuing this refund.'}, status=409)
         existing = payment.refunds.exclude(status=RefundRecord.Status.FAILED).first()
         if existing:
             return Response({'id':existing.pk,'status':existing.status,'amount':str(existing.amount),'razorpay_refund_id':existing.razorpay_refund_id}, status=200)
@@ -530,6 +532,7 @@ class AdminCreateRefundView(APIView):
         except Exception:
             refund.status = RefundRecord.Status.FAILED
             refund.save(update_fields=['status','updated_at'])
+            payment.order.vendor_settlements.filter(status=VendorSettlement.Status.HELD).update(status=VendorSettlement.Status.READY)
             return Response({'detail':'Razorpay did not accept the refund request. Verify payment capture and gateway response.'}, status=502)
         AuditLog.objects.create(actor=request.user, action='payment.refund_requested', object_type='RefundRecord', object_id=str(refund.pk), details={'payment_id':payment.pk,'amount':str(amount)})
         return Response({'id':refund.pk,'status':refund.status,'amount':str(refund.amount),'razorpay_refund_id':refund.razorpay_refund_id}, status=201)
