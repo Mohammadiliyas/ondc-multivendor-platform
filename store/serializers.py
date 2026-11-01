@@ -26,7 +26,7 @@ class ProductSerializer(serializers.ModelSerializer):
     vendor_name = serializers.CharField(source='vendor.store_name', read_only=True)
     class Meta:
         model = Product
-        fields = ('id', 'vendor', 'vendor_name', 'category', 'name', 'description', 'sku', 'price', 'stock', 'is_active', 'created_at', 'updated_at')
+        fields = ('id', 'vendor', 'vendor_name', 'category', 'name', 'description', 'image_url', 'sku', 'price', 'stock', 'is_active', 'created_at', 'updated_at')
         read_only_fields = ('vendor', 'created_at', 'updated_at')
 
 class OrderItemInputSerializer(serializers.Serializer):
