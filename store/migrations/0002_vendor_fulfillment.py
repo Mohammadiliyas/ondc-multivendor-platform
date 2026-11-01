@@ -10,7 +10,7 @@ def create_existing_fulfillments(apps, schema_editor):
         for vendor_id in vendor_ids:
             VendorFulfillment.objects.get_or_create(
                 order_id=order.pk, vendor_id=vendor_id,
-                defaults={'status': order.status if order.status in ['CANCELLED','DELIVERED'] else 'PENDING'}
+                defaults={'status': order.status if order.status in ['CONFIRMED','PACKED','SHIPPED','DELIVERED','CANCELLED'] else 'PENDING'}
             )
 
 class Migration(migrations.Migration):
