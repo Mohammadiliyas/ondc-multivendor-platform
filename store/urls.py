@@ -35,5 +35,6 @@ urlpatterns = [
     path('orders/<int:pk>/cancel/', OrderCancelView.as_view(), name='order-cancel'),
     path('', include(router.urls)),
     path('catalog/', views.catalog, name='catalog'),
+    path('product-images/<slug:sku>.svg', views.product_image, name='product-image'),
     path('ondc/catalog/', views.ondc_catalog, name='ondc-catalog'),
 ]
