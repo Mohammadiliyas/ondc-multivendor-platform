@@ -131,7 +131,10 @@ class OrderCreateView(APIView):
                 product.save(update_fields=['stock', 'updated_at'])
                 OrderItem.objects.create(order=order, product=product, product_name=product.name, unit_price=product.price, quantity=line['quantity'])
                 InventoryMovement.objects.create(product=product, quantity_delta=-line['quantity'], reason=f'Order {order.id}')
-            vendor_ids = order.items.values_list('product__vendor_id', flat=True).distinct()\n            for vendor_id in vendor_ids:\n                VendorFulfillment.objects.create(order=order, vendor_id=vendor_id)\n            AuditLog.objects.create(actor=request.user, action='order.placed', object_type='Order', object_id=str(order.pk))
+            vendor_ids = order.items.values_list('product__vendor_id', flat=True).distinct()
+            for vendor_id in vendor_ids:
+                VendorFulfillment.objects.create(order=order, vendor_id=vendor_id)
+            AuditLog.objects.create(actor=request.user, action='order.placed', object_type='Order', object_id=str(order.pk))
         return Response(OrderSerializer(order).data, status=status.HTTP_201_CREATED)
 
 class OrderListView(generics.ListAPIView):
@@ -160,6 +163,7 @@ class OrderCancelView(APIView):
                 InventoryMovement.objects.create(product=product, quantity_delta=item.quantity, reason=f'Cancellation {order.id}')
             order.status = Order.Status.CANCELLED
             order.save(update_fields=['status'])
+            order.vendor_fulfillments.update(status=VendorFulfillment.Status.CANCELLED)
             AuditLog.objects.create(actor=request.user, action='order.cancelled', object_type='Order', object_id=str(order.pk))
         return Response(OrderSerializer(order).data)
 
@@ -191,6 +195,8 @@ class VendorOrderStatusView(APIView):
                 return Response({'detail': 'Multi-vendor orders require vendor-specific fulfillment before global status changes.'}, status=409)
             order.status = new_status
             order.save(update_fields=['status'])
+            if new_status == Order.Status.CANCELLED:
+                order.vendor_fulfillments.update(status=VendorFulfillment.Status.CANCELLED)
             AuditLog.objects.create(actor=request.user, action='order.status_changed', object_type='Order', object_id=str(order.pk), details={'status': new_status})
         return Response(OrderSerializer(order).data)
 
