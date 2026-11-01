@@ -1,13 +1,13 @@
 from django.contrib.auth.models import User
 from django.db import transaction
-from django.db.models import F
+from django.db.models import Sum
 from rest_framework import generics, viewsets, status
-from rest_framework.decorators import api_view, permission_classes, action
+from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from rest_framework_simplejwt.views import TokenObtainPairView
-from .models import Vendor, Category, Product, Order, OrderItem, InventoryMovement
+from rest_framework.exceptions import PermissionDenied, ValidationError
+from .models import Vendor, Category, Product, Order, OrderItem, InventoryMovement, AuditLog
 from .serializers import RegisterSerializer, VendorSerializer, CategorySerializer, ProductSerializer, CreateOrderSerializer, OrderSerializer
 
 class RegisterView(generics.CreateAPIView):
@@ -15,17 +15,16 @@ class RegisterView(generics.CreateAPIView):
     serializer_class = RegisterSerializer
     permission_classes = [AllowAny]
 
-class CategoryViewSet(viewsets.ReadOnlyModelViewSet):
+class CategoryViewSet(viewsets.ModelViewSet):
     queryset = Category.objects.all().order_by('name')
     serializer_class = CategorySerializer
-    permission_classes = [AllowAny]
+    def get_permissions(self):
+        return [AllowAny()] if self.action in ('list', 'retrieve') else [IsAdminUser()]
 
 class ProductViewSet(viewsets.ModelViewSet):
     serializer_class = ProductSerializer
     def get_permissions(self):
-        if self.action in ('list', 'retrieve'):
-            return [AllowAny()]
-        return [IsAuthenticated()]
+        return [AllowAny()] if self.action in ('list', 'retrieve') else [IsAuthenticated()]
     def get_queryset(self):
         qs = Product.objects.select_related('vendor', 'category')
         if self.action in ('list', 'retrieve'):
@@ -34,26 +33,21 @@ class ProductViewSet(viewsets.ModelViewSet):
             pass
         else:
             vendor = getattr(self.request.user, 'vendor_profile', None)
-            qs = qs.filter(vendor=vendor) if vendor else qs.none()
+            qs = qs.filter(vendor=vendor) if vendor and vendor.is_approved and not vendor.is_suspended else qs.none()
         term = self.request.query_params.get('search')
-        if term:
-            qs = qs.filter(name__icontains=term)
-        return qs
+        return qs.filter(name__icontains=term) if term else qs
     def perform_create(self, serializer):
         vendor = getattr(self.request.user, 'vendor_profile', None)
         if not vendor or not vendor.is_approved or vendor.is_suspended:
-            from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied('An approved, active vendor account is required.')
         serializer.save(vendor=vendor)
     def perform_update(self, serializer):
         product = self.get_object()
         if not self.request.user.is_staff and product.vendor.owner_id != self.request.user.id:
-            from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied('You cannot modify another vendor product.')
         serializer.save(vendor=product.vendor)
     def perform_destroy(self, instance):
         if not self.request.user.is_staff and instance.vendor.owner_id != self.request.user.id:
-            from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied('You cannot delete another vendor product.')
         instance.delete()
 
@@ -67,52 +61,135 @@ class VendorViewSet(viewsets.ModelViewSet):
         return Vendor.objects.filter(owner=self.request.user)
     def perform_create(self, serializer):
         if hasattr(self.request.user, 'vendor_profile'):
-            from rest_framework.exceptions import ValidationError
             raise ValidationError('A vendor profile already exists for this account.')
         serializer.save(owner=self.request.user)
     @action(detail=True, methods=['post'], permission_classes=[IsAdminUser])
     def approve(self, request, pk=None):
-        vendor = self.get_object(); vendor.is_approved = True; vendor.is_suspended = False; vendor.save(update_fields=['is_approved','is_suspended'])
-        return Response({'status':'approved'})
+        vendor = self.get_object()
+        vendor.is_approved, vendor.is_suspended = True, False
+        vendor.save(update_fields=['is_approved', 'is_suspended'])
+        AuditLog.objects.create(actor=request.user, action='vendor.approved', object_type='Vendor', object_id=str(vendor.pk))
+        return Response({'status': 'approved'})
     @action(detail=True, methods=['post'], permission_classes=[IsAdminUser])
     def suspend(self, request, pk=None):
-        vendor = self.get_object(); vendor.is_suspended = True; vendor.save(update_fields=['is_suspended'])
-        return Response({'status':'suspended'})
+        vendor = self.get_object()
+        vendor.is_suspended = True
+        vendor.save(update_fields=['is_suspended'])
+        AuditLog.objects.create(actor=request.user, action='vendor.suspended', object_type='Vendor', object_id=str(vendor.pk))
+        return Response({'status': 'suspended'})
+
+class VendorDashboardView(APIView):
+    permission_classes = [IsAuthenticated]
+    def get(self, request):
+        vendor = getattr(request.user, 'vendor_profile', None)
+        if not vendor:
+            raise PermissionDenied('Vendor account required.')
+        products = Product.objects.filter(vendor=vendor)
+        lines = OrderItem.objects.filter(product__vendor=vendor).exclude(order__status=Order.Status.CANCELLED)
+        return Response({
+            'store': VendorSerializer(vendor).data,
+            'approval_status': 'suspended' if vendor.is_suspended else ('approved' if vendor.is_approved else 'pending'),
+            'product_count': products.count(),
+            'active_product_count': products.filter(is_active=True).count(),
+            'units_in_stock': products.aggregate(total=Sum('stock'))['total'] or 0,
+            'order_line_count': lines.count(),
+            'units_ordered': lines.aggregate(total=Sum('quantity'))['total'] or 0,
+        })
+
+class VendorOrderListView(generics.ListAPIView):
+    serializer_class = OrderSerializer
+    permission_classes = [IsAuthenticated]
+    def get_queryset(self):
+        vendor = getattr(self.request.user, 'vendor_profile', None)
+        if not vendor:
+            raise PermissionDenied('Vendor account required.')
+        return Order.objects.filter(items__product__vendor=vendor).distinct().prefetch_related('items').order_by('-created_at')
 
 class OrderCreateView(APIView):
     permission_classes = [IsAuthenticated]
     def post(self, request):
-        serializer = CreateOrderSerializer(data=request.data); serializer.is_valid(raise_exception=True)
+        serializer = CreateOrderSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
-        existing = Order.objects.filter(idempotency_key=data['idempotency_key']).first()
-        if existing:
-            if existing.buyer_id != request.user.id:
-                return Response({'detail':'Idempotency key already used.'}, status=409)
-            return Response(OrderSerializer(existing).data, status=200)
         with transaction.atomic():
+            existing = Order.objects.filter(idempotency_key=data['idempotency_key']).first()
+            if existing:
+                if existing.buyer_id != request.user.id:
+                    return Response({'detail': 'Idempotency key already used.'}, status=409)
+                return Response(OrderSerializer(existing).data, status=200)
             order = Order.objects.create(buyer=request.user, shipping_address=data['shipping_address'], idempotency_key=data['idempotency_key'])
             for line in data['items']:
                 try:
-                    product = Product.objects.select_for_update().select_related('vendor').get(pk=line['product_id'], is_active=True, vendor__is_approved=True, vendor__is_suspended=False)
+                    product = Product.objects.select_for_update().select_related('vendor').get(
+                        pk=line['product_id'], is_active=True,
+                        vendor__is_approved=True, vendor__is_suspended=False)
                 except Product.DoesNotExist:
-                    from rest_framework.exceptions import ValidationError
                     raise ValidationError({'items': f"Product {line['product_id']} is unavailable."})
                 if product.stock < line['quantity']:
-                    from rest_framework.exceptions import ValidationError
                     raise ValidationError({'items': f"Insufficient stock for {product.name}."})
-                product.stock -= line['quantity']; product.save(update_fields=['stock','updated_at'])
+                product.stock -= line['quantity']
+                product.save(update_fields=['stock', 'updated_at'])
                 OrderItem.objects.create(order=order, product=product, product_name=product.name, unit_price=product.price, quantity=line['quantity'])
                 InventoryMovement.objects.create(product=product, quantity_delta=-line['quantity'], reason=f'Order {order.id}')
+            AuditLog.objects.create(actor=request.user, action='order.placed', object_type='Order', object_id=str(order.pk))
         return Response(OrderSerializer(order).data, status=status.HTTP_201_CREATED)
 
 class OrderListView(generics.ListAPIView):
     serializer_class = OrderSerializer
     permission_classes = [IsAuthenticated]
     def get_queryset(self):
-        if self.request.user.is_staff: return Order.objects.prefetch_related('items').all().order_by('-created_at')
-        return Order.objects.filter(buyer=self.request.user).prefetch_related('items').order_by('-created_at')
+        qs = Order.objects.prefetch_related('items').order_by('-created_at')
+        return qs if self.request.user.is_staff else qs.filter(buyer=self.request.user)
 
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-def register_vendor(request):
-    return Response({'detail':'Use POST /api/vendors/ with store_name and description.'}, status=200)
+class OrderCancelView(APIView):
+    permission_classes = [IsAuthenticated]
+    def post(self, request, pk):
+        with transaction.atomic():
+            try:
+                order = Order.objects.select_for_update().get(pk=pk)
+            except Order.DoesNotExist:
+                return Response({'detail': 'Order not found.'}, status=404)
+            if not request.user.is_staff and order.buyer_id != request.user.id:
+                raise PermissionDenied('You cannot cancel this order.')
+            if order.status not in (Order.Status.PLACED, Order.Status.CONFIRMED):
+                return Response({'detail': 'Only placed or confirmed orders can be cancelled.'}, status=409)
+            for item in order.items.select_related('product').all():
+                product = Product.objects.select_for_update().get(pk=item.product_id)
+                product.stock += item.quantity
+                product.save(update_fields=['stock', 'updated_at'])
+                InventoryMovement.objects.create(product=product, quantity_delta=item.quantity, reason=f'Cancellation {order.id}')
+            order.status = Order.Status.CANCELLED
+            order.save(update_fields=['status'])
+            AuditLog.objects.create(actor=request.user, action='order.cancelled', object_type='Order', object_id=str(order.pk))
+        return Response(OrderSerializer(order).data)
+
+class VendorOrderStatusView(APIView):
+    permission_classes = [IsAuthenticated]
+    transitions = {
+        Order.Status.PLACED: {Order.Status.CONFIRMED, Order.Status.CANCELLED},
+        Order.Status.CONFIRMED: {Order.Status.PACKED, Order.Status.CANCELLED},
+        Order.Status.PACKED: {Order.Status.SHIPPED},
+        Order.Status.SHIPPED: {Order.Status.DELIVERED},
+    }
+    def patch(self, request, pk):
+        vendor = getattr(request.user, 'vendor_profile', None)
+        if not request.user.is_staff and not vendor:
+            raise PermissionDenied('Vendor account required.')
+        new_status = request.data.get('status')
+        if new_status not in Order.Status.values:
+            raise ValidationError({'status': 'Invalid order status.'})
+        with transaction.atomic():
+            try:
+                order = Order.objects.select_for_update().get(pk=pk)
+            except Order.DoesNotExist:
+                return Response({'detail': 'Order not found.'}, status=404)
+            if not request.user.is_staff and not order.items.filter(product__vendor=vendor).exists():
+                raise PermissionDenied('This order does not contain your products.')
+            if new_status not in self.transitions.get(order.status, set()):
+                return Response({'detail': f'Invalid transition: {order.status} to {new_status}.'}, status=409)
+            if not request.user.is_staff and order.items.exclude(product__vendor=vendor).exists():
+                return Response({'detail': 'Multi-vendor orders require vendor-specific fulfillment before global status changes.'}, status=409)
+            order.status = new_status
+            order.save(update_fields=['status'])
+            AuditLog.objects.create(actor=request.user, action='order.status_changed', object_type='Order', object_id=str(order.pk), details={'status': new_status})
+        return Response(OrderSerializer(order).data)
