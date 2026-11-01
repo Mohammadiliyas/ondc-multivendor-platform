@@ -126,6 +126,7 @@ class MarketplaceAPITests(TestCase):
         }, format='json')
         self.assertEqual(response.status_code, 201)
         self.assertEqual(VendorFulfillment.objects.filter(order_id=response.data['id']).count(), 2)
+        PaymentRecord.objects.create(order_id=response.data['id'], provider='razorpay', status=PaymentRecord.Status.PAID, amount='15.00', razorpay_order_id='order_paid_multi')
         self.auth(self.seller)
         own = self.client.get('/api/vendor/fulfillments/')
         self.assertEqual(own.status_code, 200)
@@ -160,6 +161,7 @@ class MarketplaceAPITests(TestCase):
         }, format='json')
         order_id = response.data['id']
         fulfillment = VendorFulfillment.objects.get(order_id=order_id, vendor=self.vendor)
+        PaymentRecord.objects.create(order_id=order_id, provider='razorpay', status=PaymentRecord.Status.PAID, amount='12.50', razorpay_order_id='order_paid_single')
         self.auth(self.seller)
         updated = self.client.patch(f'/api/vendor/fulfillments/{fulfillment.pk}/status/', {'status':'CONFIRMED'}, format='json')
         self.assertEqual(updated.status_code, 200)
@@ -265,3 +267,29 @@ class MarketplaceAPITests(TestCase):
         second = self.client.generic('POST','/api/payments/razorpay/webhook/',data=body,**headers)
         self.assertEqual(second.status_code, 200)
         self.assertEqual(PaymentWebhookEvent.objects.count(), 1)
+
+
+    def test_vendor_cannot_progress_fulfillment_before_payment_capture(self):
+        self.auth(self.buyer)
+        response = self.client.post('/api/orders/create/', {
+            'shipping_address':'12 Main Road, Hyderabad',
+            'idempotency_key':'vendor-before-paid',
+            'items':[{'product_id':self.product.pk,'quantity':1}]
+        }, format='json')
+        fulfillment = VendorFulfillment.objects.get(order_id=response.data['id'], vendor=self.vendor)
+        self.auth(self.seller)
+        denied = self.client.patch(f'/api/vendor/fulfillments/{fulfillment.pk}/status/', {'status':'CONFIRMED'}, format='json')
+        self.assertEqual(denied.status_code, 409)
+
+    def test_buyer_cannot_cancel_captured_payment_without_refund(self):
+        self.auth(self.buyer)
+        response = self.client.post('/api/orders/create/', {
+            'shipping_address':'12 Main Road, Hyderabad',
+            'idempotency_key':'paid-order-no-cancel',
+            'items':[{'product_id':self.product.pk,'quantity':1}]
+        }, format='json')
+        PaymentRecord.objects.create(order_id=response.data['id'], provider='razorpay', status=PaymentRecord.Status.PAID, amount='12.50', razorpay_order_id='order_paid_cancel')
+        denied = self.client.post(f'/api/orders/{response.data["id"]}/cancel/')
+        self.assertEqual(denied.status_code, 409)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 4)
