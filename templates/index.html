@@ -36,10 +36,62 @@
 <section id="admin" class="section hidden"><h2>Platform administration</h2><p class="muted">Staff-only vendor approvals, categories, orders and audit activity.</p><div id="adminStats" class="panel">Administrator sign-in required.</div><div class="grid"><div class="panel"><h3>Vendor applications</h3><div id="adminVendors"></div></div><div class="panel"><h3>Categories</h3><form id="categoryForm"><input name="name" required maxlength="100" placeholder="Category name"><button>Create category</button></form><div id="adminCategories"></div></div></div><div class="panel"><h3>Platform orders</h3><div id="adminOrders"></div></div><div class="panel"><h3>Recent audit activity</h3><div id="adminAudit"></div></div></section><section id="cart" class="section hidden"><h2>Your cart</h2><div class="panel"><div id="cartItems"></div><form id="checkout" class="formgrid"><div class="field full"><label>Shipping address</label><textarea name="shipping_address" minlength="10" required></textarea></div><button class="full">Place order</button></form></div></section></main><div class="modal-backdrop" id="productModal" onclick="if(event.target===this)closeProduct()"><div class="product-modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle"><button class="modal-close" onclick="closeProduct()" aria-label="Close">×</button><div class="product-modal-image"><img id="modalImage" alt=""></div><div class="product-modal-copy"><span class="tag" id="modalCategory">PRODUCT</span><h2 id="modalTitle"></h2><p id="modalDescription"></p><div class="product-meta" id="modalVendor"></div><div class="modal-price" id="modalPrice"></div><div class="product-meta" id="modalStock"></div><div class="modal-actions"><button id="modalAdd" onclick="addSelected()">Add to bag</button><button class="ghost" onclick="closeProduct()">Continue browsing</button></div></div></div></div><div class="toast" id="toast" role="status" aria-live="polite"></div><footer>MarketLane · Django marketplace · ONDC mock adapter · Razorpay test mode until production credentials are explicitly configured</footer>
 <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
 <script>
-const $=id=>document.getElementById(id);let token=localStorage.getItem('ml_token')||'',catalog=[],cart={},activeCategory='';
+const $=id=>document.getElementById(id);
+let token=localStorage.getItem('ml_token')||'',refreshToken=localStorage.getItem('ml_refresh')||'',catalog=[],cart={},activeCategory='',refreshInFlight=null;
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function msg(s,bad=false){$('notice').innerHTML='<div class="notice '+(bad?'error':'')+'">'+esc(s)+'</div>';window.scrollTo(0,0)}
-async function api(url,opt={}){let h={...(opt.body?{'Content-Type':'application/json'}:{}),...(token?{Authorization:'Bearer '+token}:{}),...(opt.headers||{})};let r=await fetch(url,{...opt,headers:h}),d={};try{d=await r.json()}catch{}if(!r.ok){let err=Error(d.detail||JSON.stringify(d)||'Request failed '+r.status);err.data=d;throw err}return d}
+function readableError(data,status){
+  if(data&&typeof data.detail==='string')return data.detail;
+  if(data&&Array.isArray(data.non_field_errors))return data.non_field_errors.join(' ');
+  if(data&&typeof data==='object'){
+    const parts=[];
+    for(const [key,value] of Object.entries(data)){
+      const messages=Array.isArray(value)?value.map(v=>typeof v==='string'?v:(v&&v.message)||JSON.stringify(v)).join(' '):(typeof value==='string'?value:JSON.stringify(value));
+      if(messages)parts.push((key==='detail'?'':key+': ')+messages);
+    }
+    if(parts.length)return parts.join(' · ');
+  }
+  return 'Request failed ('+status+').';
+}
+function clearAuth(){
+  token='';refreshToken='';
+  localStorage.removeItem('ml_token');localStorage.removeItem('ml_refresh');
+  updateAccount();
+}
+async function refreshAccessToken(){
+  if(!refreshToken)return false;
+  if(refreshInFlight)return refreshInFlight;
+  refreshInFlight=(async()=>{
+    try{
+      const response=await fetch('/api/token/refresh/',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({refresh:refreshToken})});
+      const data=await response.json().catch(()=>({}));
+      if(!response.ok||!data.access){clearAuth();return false}
+      token=data.access;localStorage.setItem('ml_token',token);
+      if(data.refresh){refreshToken=data.refresh;localStorage.setItem('ml_refresh',refreshToken)}
+      updateAccount();return true;
+    }catch(_){clearAuth();return false}
+    finally{refreshInFlight=null}
+  })();
+  return refreshInFlight;
+}
+async function api(url,opt={}){
+  const makeRequest=()=>fetch(url,{...opt,headers:{...(opt.body?{'Content-Type':'application/json'}:{}),...(token?{Authorization:'Bearer '+token}:{}),...(opt.headers||{})}});
+  let response=await makeRequest();
+  let data=await response.json().catch(()=>({}));
+  if(response.status===401&&token&&refreshToken&&url!=='/api/token/'&&url!=='/api/token/refresh/'){
+    if(await refreshAccessToken()){
+      response=await makeRequest();
+      data=await response.json().catch(()=>({}));
+    }else{
+      throw new Error('Your session expired. Please sign in again.');
+    }
+  }
+  if(!response.ok){
+    if(response.status===401&&url!=='/api/token/')clearAuth();
+    const error=new Error(readableError(data,response.status));error.data=data;error.status=response.status;throw error;
+  }
+  return data;
+}
 function show(id){['shop','account','orders','vendor','admin','cart'].forEach(x=>$(x).classList.toggle('hidden',x!==id));if(id==='orders')orders();if(id==='vendor')vendor();if(id==='admin')admin();if(id==='cart')drawCart()}
 function placeholderImage(){const svg='<svg xmlns="http://www.w3.org/2000/svg" width="900" height="650" viewBox="0 0 900 650"><defs><linearGradient id="g" x1="0" x2="1" y1="0" y2="1"><stop stop-color="#e4efe5"/><stop offset="1" stop-color="#f5f0df"/></linearGradient></defs><rect width="900" height="650" fill="url(#g)"/><circle cx="450" cy="260" r="105" fill="#176b4a" opacity=".1"/><path d="M385 255h130l-12 150H397z" fill="#176b4a" opacity=".85"/><path d="M415 255v-35a35 35 0 0 1 70 0v35" fill="none" stroke="#176b4a" stroke-width="16" stroke-linecap="round"/><text x="450" y="485" font-family="Arial,sans-serif" font-size="30" font-weight="700" fill="#234b37" text-anchor="middle">MARKETLANE</text><text x="450" y="525" font-family="Arial,sans-serif" font-size="18" fill="#64766a" text-anchor="middle">Product image coming soon</text></svg>';return 'data:image/svg+xml;charset=UTF-8,'+encodeURIComponent(svg)}
 function imageFallback(img){img.onerror=null;img.src=placeholderImage()}
@@ -58,7 +110,7 @@ document.addEventListener('keydown',e=>{if(e.key==='Escape')closeProduct()});
 function cartCount(){$('cartCount').textContent='Cart '+Object.values(cart).reduce((a,b)=>a+b,0)}
 function drawCart(){let a=Object.entries(cart),total=0;$('cartItems').innerHTML=a.length?a.map(([id,n])=>{let p=catalog.find(x=>x.id===+id);if(!p)return '';total+=Number(p.price)*n;return '<div class="cart-row"><img class="cart-thumb" src="'+productImage(p)+'" alt="'+esc(p.name)+'" onerror="imageFallback(this)"><div class="cart-info"><strong>'+esc(p.name)+'</strong><small>'+esc(p.category||'')+' · ₹'+Number(p.price).toFixed(2)+' each</small><div><b>₹'+(Number(p.price)*n).toFixed(2)+'</b></div></div><div class="cart-controls"><button class="ghost" onclick="qty('+id+',-1)">−</button><b>'+n+'</b><button class="ghost" onclick="qty('+id+',1)">+</button></div></div>'}).join('')+'<div class="cart-total">Subtotal&nbsp; ₹'+total.toFixed(2)+'</div>':'<div class="empty">Your cart is empty.</div>';$('checkout').classList.toggle('hidden',!a.length||!token)}
 function qty(id,d){let p=catalog.find(x=>x.id===+id);cart[id]=Math.max(0,Math.min(p.stock,(cart[id]||0)+d));if(!cart[id])delete cart[id];cartCount();drawCart()}
-$('login').onsubmit=async e=>{e.preventDefault();try{let v=Object.fromEntries(new FormData(e.target));v.username=v.mobile;delete v.mobile;let d=await api('/api/token/',{method:'POST',body:JSON.stringify(v)});token=d.access;localStorage.setItem('ml_token',token);$('accountBtn').textContent='Account';msg('Signed in.');show('shop')}catch(x){msg(x.message,true)}};
+$('login').onsubmit=async e=>{e.preventDefault();try{let v=Object.fromEntries(new FormData(e.target));v.username=v.mobile;delete v.mobile;let d=await api('/api/token/',{method:'POST',body:JSON.stringify(v)});token=d.access||'';refreshToken=d.refresh||'';if(token)localStorage.setItem('ml_token',token);else localStorage.removeItem('ml_token');if(refreshToken)localStorage.setItem('ml_refresh',refreshToken);else localStorage.removeItem('ml_refresh');updateAccount();msg('Signed in.');show('shop')}catch(x){msg(x.message,true)}};
 let pendingSignup='';
 $('register').onsubmit=async e=>{e.preventDefault();try{let v=Object.fromEntries(new FormData(e.target));let d=await api('/api/auth/register/',{method:'POST',body:JSON.stringify(v)});pendingSignup=d.username||v.username||v.mobile;$('otpPanel').classList.remove('hidden');$('verifyOtp').reset();msg(d.detail||'OTP codes sent. Verify both channels.');}catch(x){if(x.data&&x.data.username){pendingSignup=x.data.username||v.username||v.mobile;$('otpPanel').classList.remove('hidden')}let detail=x.data?Object.entries(x.data).map(([k,v])=>k+': '+(Array.isArray(v)?v.join(' '):v)).join(' · '):x.message;msg(detail,true)}};
 $('verifyOtp').onsubmit=async e=>{e.preventDefault();try{let v=Object.fromEntries(new FormData(e.target));let d=await api('/api/auth/verify-otp/',{method:'POST',body:JSON.stringify({username:pendingSignup,...v})});msg(d.detail||'Verification updated.');if(d.verified){$('otpPanel').classList.add('hidden');$('login').elements.mobile.value=$('register').elements.phone.value;}else{$('verifyOtp').reset();}}catch(x){msg(x.message,true)}};
@@ -83,5 +135,5 @@ $("categoryForm").onsubmit=async e=>{e.preventDefault();try{await api("/api/cate
 async function adminOrders(){let a=await api("/api/orders/");$("adminOrders").innerHTML=a.length?a.map(o=>"<div class='line'><span>Order #"+o.id+" · "+esc(o.status)+" · "+esc(o.buyer)+"</span><select onchange=\"adminSetOrder("+o.id+",this.value)\"><option value=''>Set status</option>"+["PLACED","CONFIRMED","PACKED","SHIPPED","DELIVERED","CANCELLED"].map(s=>"<option>"+s+"</option>").join("")+"</select></div>").join(""):"No orders."}
 async function adminSetOrder(id,status){if(!status)return;try{await api("/api/admin/orders/"+id+"/status/",{method:"PATCH",body:JSON.stringify({status})});msg("Order status changed.");adminOrders()}catch(e){msg(e.message,true)}}
 async function adminAudit(){let a=await api("/api/admin/audit-logs/");$("adminAudit").innerHTML=a.length?a.map(x=>"<div class='line'><span>"+esc(x.actor||"System")+" · "+esc(x.action)+" · "+esc(x.object_type)+" #"+esc(x.object_id)+"</span><small>"+new Date(x.created_at).toLocaleString()+"</small></div>").join(""):"No audit events."}
-$('search').oninput=()=>{clearTimeout(window.st);window.st=setTimeout(load,250)};updateAccount();function updateAccount(){$('accountBtn').textContent=token?'Account':'Sign in'}load();
+$('search').oninput=()=>{clearTimeout(window.st);window.st=setTimeout(load,250)};updateAccount();function updateAccount(){$('accountBtn').textContent=token?'Account':'Sign in';$('checkout').classList.toggle('hidden',!Object.keys(cart).length||!token)}load();
 </script></body></html>
