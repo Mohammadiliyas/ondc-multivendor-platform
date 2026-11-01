@@ -1,6 +1,7 @@
 from django.contrib.auth.models import User
 from rest_framework import serializers
 from django.contrib.auth.password_validation import validate_password
+import re
 from .models import Vendor, Category, Product, Order, OrderItem, VendorFulfillment, PaymentRecord
 
 class RegisterSerializer(serializers.ModelSerializer):
@@ -17,7 +18,7 @@ class RegisterSerializer(serializers.ModelSerializer):
         return value
     def validate_phone(self, value):
         value = ''.join(ch for ch in value if ch.isdigit() or ch == '+')
-        if not value.startswith('+') or len(value) < 10 or len(value) > 16:
+        if not re.fullmatch(r'\+[1-9][0-9]{8,14}', value):
             raise serializers.ValidationError('Enter a phone number in international format, e.g. +919876543210.')
         from .models import UserVerification
         if UserVerification.objects.filter(phone=value).exists():
