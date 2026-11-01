@@ -1,9 +1,12 @@
 from django.test import TestCase, override_settings
+from django.core.management import call_command
+from django.utils import timezone
+from datetime import timedelta
 from unittest.mock import patch
 import hashlib, hmac, json
 from django.contrib.auth.models import User
 from rest_framework.test import APIClient
-from .models import Vendor, Category, Product, Order, OrderItem, InventoryMovement, VendorFulfillment, PaymentRecord, PaymentWebhookEvent
+from .models import Vendor, Category, Product, Order, OrderItem, InventoryMovement, VendorFulfillment, PaymentRecord, PaymentWebhookEvent, RefundRecord, VendorSettlement
 
 class MarketplaceAPITests(TestCase):
     def setUp(self):
@@ -293,3 +296,53 @@ class MarketplaceAPITests(TestCase):
         self.assertEqual(denied.status_code, 409)
         self.product.refresh_from_db()
         self.assertEqual(self.product.stock, 4)
+
+
+    @override_settings(UNPAID_ORDER_EXPIRY_MINUTES=30)
+    def test_expire_unpaid_orders_releases_reserved_stock(self):
+        order = self._create_order_for_payment('expiry-stock-release')
+        old_created = timezone.now() - timedelta(hours=1)
+        Order.objects.filter(pk=order.data['id']).update(created_at=old_created)
+        call_command('expire_unpaid_orders')
+        expired = Order.objects.get(pk=order.data['id'])
+        self.assertEqual(expired.status, Order.Status.CANCELLED)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 5)
+        self.assertEqual(InventoryMovement.objects.filter(reason__contains='Unpaid order expiry').count(), 1)
+
+    @override_settings(UNPAID_ORDER_EXPIRY_MINUTES=30)
+    def test_expiry_does_not_cancel_paid_order(self):
+        order = self._create_order_for_payment('expiry-paid-order')
+        PaymentRecord.objects.create(order_id=order.data['id'], status=PaymentRecord.Status.PAID, amount='25.00', razorpay_order_id='order_paid_expiry')
+        Order.objects.filter(pk=order.data['id']).update(created_at=timezone.now()-timedelta(hours=1))
+        call_command('expire_unpaid_orders')
+        self.assertEqual(Order.objects.get(pk=order.data['id']).status, Order.Status.PLACED)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 3)
+
+    @override_settings(RAZORPAY_KEY_ID='rzp_test_demo', RAZORPAY_KEY_SECRET='test_secret')
+    @patch('store.api_views.razorpay.Client')
+    def test_admin_can_request_full_refund_through_razorpay(self, client_class):
+        order = self._create_order_for_payment('refund-request')
+        payment = PaymentRecord.objects.create(order_id=order.data['id'], status=PaymentRecord.Status.PAID, amount='25.00', razorpay_order_id='order_refund', razorpay_payment_id='pay_refund')
+        client_class.return_value.payment.refund.return_value = {'id':'rfnd_test_123'}
+        self.auth(self.admin)
+        response = self.client.post(f'/api/admin/payments/{payment.pk}/refund/', {'reason':'Customer request'}, format='json')
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data['status'], RefundRecord.Status.PENDING)
+        self.assertEqual(str(RefundRecord.objects.get(payment=payment).amount), '25.00')
+        client_class.return_value.payment.refund.assert_called_once()
+
+    @override_settings(RAZORPAY_WEBHOOK_SECRET='webhook_test_secret')
+    def test_refund_processed_webhook_marks_full_refund_and_is_signed(self):
+        order = self._create_order_for_payment('refund-webhook')
+        payment = PaymentRecord.objects.create(order_id=order.data['id'], status=PaymentRecord.Status.PAID, amount='25.00', razorpay_order_id='order_refund_webhook', razorpay_payment_id='pay_refund_webhook')
+        refund = RefundRecord.objects.create(payment=payment, razorpay_refund_id='rfnd_processed_1', amount='25.00')
+        body = json.dumps({'event':'refund.processed','payload':{'refund':{'entity':{'id':'rfnd_processed_1','payment_id':'pay_refund_webhook','amount':2500,'currency':'INR'}}}}).encode()
+        signature = hmac.new(b'webhook_test_secret', body, hashlib.sha256).hexdigest()
+        response = self.client.generic('POST','/api/payments/razorpay/webhook/',data=body,content_type='application/json',HTTP_X_RAZORPAY_SIGNATURE=signature,HTTP_X_RAZORPAY_EVENT_ID='evt_refund_processed')
+        self.assertEqual(response.status_code, 200)
+        refund.refresh_from_db()
+        payment.refresh_from_db()
+        self.assertEqual(refund.status, RefundRecord.Status.PROCESSED)
+        self.assertEqual(payment.status, PaymentRecord.Status.REFUNDED)
