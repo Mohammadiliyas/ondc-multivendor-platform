@@ -88,5 +88,3 @@ MSG91_OTP_EXPIRY_SECONDS = int(os.getenv('MSG91_OTP_EXPIRY_SECONDS', '300'))
 RAZORPAY_MODE = os.getenv('RAZORPAY_MODE', 'test').lower()
 if RAZORPAY_MODE not in ('test', 'live'):
     raise RuntimeError('RAZORPAY_MODE must be test or live.')
-if RAZORPAY_MODE == 'test' and RAZORPAY_KEY_ID and not RAZORPAY_KEY_ID.startswith('rzp_test_'):
-    raise RuntimeError('RAZORPAY_MODE=test requires a Razorpay test Key ID (rzp_test_...).')
