@@ -1,7 +1,7 @@
 from django.test import TestCase
 from django.contrib.auth.models import User
 from rest_framework.test import APIClient
-from .models import Vendor, Category, Product, Order, OrderItem, InventoryMovement
+from .models import Vendor, Category, Product, Order, OrderItem, InventoryMovement, VendorFulfillment
 
 class MarketplaceAPITests(TestCase):
     def setUp(self):
@@ -110,3 +110,56 @@ class MarketplaceAPITests(TestCase):
         self.assertEqual(again.status_code, 200)
         self.product.refresh_from_db()
         self.assertEqual(self.product.stock, 5)
+
+
+    def test_multi_vendor_checkout_creates_isolated_fulfillments(self):
+        seller_two = User.objects.create_user(username='seller_two', password='StrongPass123!')
+        vendor_two = Vendor.objects.create(owner=seller_two, store_name='Second Store', is_approved=True)
+        product_two = Product.objects.create(vendor=vendor_two, category=self.category, name='Second item', sku='DEMO-002', price='5.00', stock=4)
+        self.auth(self.buyer)
+        response = self.client.post('/api/orders/create/', {
+            'shipping_address':'12 Main Road, Hyderabad',
+            'idempotency_key':'multi-vendor-order-1',
+            'items':[{'product_id':self.product.pk,'quantity':1},{'product_id':product_two.pk,'quantity':2}]
+        }, format='json')
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(VendorFulfillment.objects.filter(order_id=response.data['id']).count(), 2)
+        self.auth(self.seller)
+        own = self.client.get('/api/vendor/fulfillments/')
+        self.assertEqual(own.status_code, 200)
+        self.assertEqual(len(own.data), 1)
+        self.assertEqual(len(own.data[0]['items']), 1)
+        self.assertEqual(own.data[0]['items'][0]['product'], self.product.pk)
+        self.assertIn('shipping_address', own.data[0])
+        self.assertNotIn('Second item', str(own.data[0]['items']))
+
+    def test_vendor_cannot_read_or_update_another_vendors_fulfillment(self):
+        seller_two = User.objects.create_user(username='seller_three', password='StrongPass123!')
+        vendor_two = Vendor.objects.create(owner=seller_two, store_name='Third Store', is_approved=True)
+        product_two = Product.objects.create(vendor=vendor_two, category=self.category, name='Third item', sku='DEMO-003', price='7.00', stock=3)
+        self.auth(self.buyer)
+        response = self.client.post('/api/orders/create/', {
+            'shipping_address':'12 Main Road, Hyderabad',
+            'idempotency_key':'multi-vendor-order-2',
+            'items':[{'product_id':self.product.pk,'quantity':1},{'product_id':product_two.pk,'quantity':1}]
+        }, format='json')
+        self.assertEqual(response.status_code, 201)
+        foreign = VendorFulfillment.objects.get(order_id=response.data['id'], vendor=vendor_two)
+        self.auth(self.seller)
+        denied = self.client.patch(f'/api/vendor/fulfillments/{foreign.pk}/status/', {'status':'CONFIRMED'}, format='json')
+        self.assertEqual(denied.status_code, 404)
+
+    def test_vendor_fulfillment_status_updates_parent_only_when_all_vendors_progress(self):
+        self.auth(self.buyer)
+        response = self.client.post('/api/orders/create/', {
+            'shipping_address':'12 Main Road, Hyderabad',
+            'idempotency_key':'single-vendor-fulfillment',
+            'items':[{'product_id':self.product.pk,'quantity':1}]
+        }, format='json')
+        order_id = response.data['id']
+        fulfillment = VendorFulfillment.objects.get(order_id=order_id, vendor=self.vendor)
+        self.auth(self.seller)
+        updated = self.client.patch(f'/api/vendor/fulfillments/{fulfillment.pk}/status/', {'status':'CONFIRMED'}, format='json')
+        self.assertEqual(updated.status_code, 200)
+        order = Order.objects.get(pk=order_id)
+        self.assertEqual(order.status, Order.Status.CONFIRMED)
