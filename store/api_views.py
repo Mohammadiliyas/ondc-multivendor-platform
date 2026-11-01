@@ -193,3 +193,58 @@ class VendorOrderStatusView(APIView):
             order.save(update_fields=['status'])
             AuditLog.objects.create(actor=request.user, action='order.status_changed', object_type='Order', object_id=str(order.pk), details={'status': new_status})
         return Response(OrderSerializer(order).data)
+
+
+class AdminDashboardView(APIView):
+    permission_classes = [IsAdminUser]
+    def get(self, request):
+        from django.contrib.auth import get_user_model
+        UserModel = get_user_model()
+        return Response({
+            'users': UserModel.objects.count(),
+            'vendors_total': Vendor.objects.count(),
+            'vendors_pending': Vendor.objects.filter(is_approved=False, is_suspended=False).count(),
+            'vendors_approved': Vendor.objects.filter(is_approved=True, is_suspended=False).count(),
+            'vendors_suspended': Vendor.objects.filter(is_suspended=True).count(),
+            'products': Product.objects.count(),
+            'active_products': Product.objects.filter(is_active=True).count(),
+            'orders': Order.objects.count(),
+            'orders_open': Order.objects.exclude(status__in=[Order.Status.DELIVERED, Order.Status.CANCELLED]).count(),
+            'recent_audit': list(AuditLog.objects.select_related('actor').order_by('-created_at').values('id','actor__username','action','object_type','object_id','created_at')[:12]),
+        })
+
+class AdminOrderStatusView(APIView):
+    permission_classes = [IsAdminUser]
+    allowed = set(Order.Status.values)
+    def patch(self, request, pk):
+        new_status = request.data.get('status')
+        if new_status not in self.allowed:
+            raise ValidationError({'status': 'Invalid order status.'})
+        with transaction.atomic():
+            try:
+                order = Order.objects.select_for_update().get(pk=pk)
+            except Order.DoesNotExist:
+                return Response({'detail': 'Order not found.'}, status=404)
+            old_status = order.status
+            if old_status == Order.Status.CANCELLED and new_status != Order.Status.CANCELLED:
+                return Response({'detail': 'Cancelled orders cannot be reopened.'}, status=409)
+            if old_status == Order.Status.DELIVERED and new_status != Order.Status.DELIVERED:
+                return Response({'detail': 'Delivered orders cannot be moved backwards.'}, status=409)
+            if new_status == Order.Status.CANCELLED and old_status != Order.Status.CANCELLED:
+                for item in order.items.all():
+                    product = Product.objects.select_for_update().get(pk=item.product_id)
+                    product.stock += item.quantity
+                    product.save(update_fields=['stock', 'updated_at'])
+                    InventoryMovement.objects.create(product=product, quantity_delta=item.quantity, reason=f'Admin cancellation {order.id}')
+            order.status = new_status
+            order.save(update_fields=['status'])
+            AuditLog.objects.create(actor=request.user, action='admin.order_status_changed', object_type='Order', object_id=str(order.pk), details={'from': old_status, 'to': new_status})
+        return Response(OrderSerializer(order).data)
+
+class AdminAuditLogView(generics.ListAPIView):
+    permission_classes = [IsAdminUser]
+    def get_queryset(self):
+        return AuditLog.objects.select_related('actor').order_by('-created_at')
+    def list(self, request, *args, **kwargs):
+        qs = self.get_queryset()[:100]
+        return Response([{'id':x.id,'actor':x.actor.username if x.actor else None,'action':x.action,'object_type':x.object_type,'object_id':x.object_id,'details':x.details,'created_at':x.created_at} for x in qs])
