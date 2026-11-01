@@ -1,37 +1,92 @@
 # ONDC-Integrated Multi-Vendor E-Commerce Platform
 
-Django starter scaffold for a multi-vendor marketplace with a product catalog and a clearly marked **mock ONDC catalog adapter**.
+A Django REST Framework marketplace prototype with buyer shopping, vendor onboarding, platform administration, split vendor fulfilment, and a development-only ONDC/Beckn adapter.
 
-> **Development status:** This repository is an initial scaffold, not a complete or production-ready marketplace. Full authentication/role enforcement, vendor CRUD workflows, order checkout, payment/logistics integrations, production ONDC signing/callbacks, and production deployment still need implementation and verification.
+> **Status:** Active development. Core buyer/vendor/admin workflows and split fulfilment are implemented. Payment processing, production-grade deployment hardening, live ONDC network connectivity, and ONDC conformance are not yet complete. Passing CI does not mean production readiness.
 
 ## Technology
-- Python / Django
-- Django REST Framework dependencies included for API expansion
-- MySQL when `MYSQL_DATABASE` is configured; SQLite otherwise for local development
-- Django Admin
-- GitHub Actions CI scaffold
 
-## Quick start
+- Python 3.12+
+- Django 5.1 / Django REST Framework
+- JWT authentication (Simple JWT)
+- MySQL for configured environments; SQLite fallback for local development and CI
+- Responsive HTML/CSS/JavaScript storefront
+- GitHub Actions CI
+- OpenAPI schema and Swagger UI
+
+## User roles
+
+- **Buyer:** register, browse approved products, checkout, view own orders, and cancel while fulfilment has not progressed beyond confirmation.
+- **Vendor:** apply for a store, wait for admin approval, manage own products, view only own order lines, and update own fulfilment/tracking.
+- **Platform admin:** approve/suspend vendors, manage categories, inspect platform orders, and review audit activity.
+
+A buyer order containing products from multiple vendors creates one vendor fulfilment record per vendor. Each vendor sees only its own line items. The buyer sees the combined order.
+
+## Local setup
+
 1. Install Python 3.12+.
 2. Create and activate a virtual environment.
-3. Install dependencies: `pip install -r requirements.txt`
-4. Copy `.env.example` to `.env`; change the secret and configure database variables.
-5. Run `python manage.py migrate`
-6. Create an admin user: `python manage.py createsuperuser`
-7. Start the server: `python manage.py runserver`
+3. Install packages: `pip install -r requirements.txt`.
+4. Copy `.env.example` to `.env` and configure a strong secret and database credentials.
+5. Apply migrations: `python manage.py migrate`.
+6. Create a platform administrator: `python manage.py createsuperuser`.
+7. Run locally: `python manage.py runserver`.
 
-## Current endpoints
-- `GET /api/health/` — health check
-- `GET /api/catalog/` — active products from approved vendors; optional `?search=term`
-- `GET /api/ondc/catalog/` — development-only mock ONDC-style catalog mapping
+If `MYSQL_DATABASE` is set, Django uses MySQL. Otherwise it uses SQLite.
 
-Django Admin is available at `/admin/`.
+## Main routes
 
-## Environment variables
-See `.env.example`. If `MYSQL_DATABASE` is set, configure the matching MySQL host, port, user, password and database. If it is unset, SQLite is used.
+| Route | Purpose |
+|---|---|
+| `/` | Storefront |
+| `/admin/` | Django administration |
+| `/api/docs/` | Swagger UI |
+| `/api/schema/` | OpenAPI schema |
+| `/api/health/` | Health check |
+| `/api/auth/register/` | Buyer account registration |
+| `/api/token/` | JWT login |
+| `/api/products/` | Public catalogue / vendor-owned product management |
+| `/api/vendors/` | Vendor applications and admin approval/suspension |
+| `/api/dashboard/vendor/` | Vendor dashboard metrics |
+| `/api/orders/create/` | Buyer checkout |
+| `/api/orders/` | Buyer order history (staff can inspect all) |
+| `/api/orders/<id>/cancel/` | Buyer/admin cancellation under fulfilment rules |
+| `/api/vendor/fulfillments/` | Vendor-specific fulfilment list |
+| `/api/vendor/fulfillments/<id>/status/` | Update own fulfilment and tracking reference |
+| `/api/admin/dashboard/` | Admin platform metrics |
+| `/api/admin/audit-logs/` | Admin audit history |
+| `/api/ondc/catalog/` | Mock ONDC-style catalogue only |
+
+## Checkout and fulfilment rules
+
+- Stock is reserved inside a database transaction.
+- Order items preserve product name and price at checkout.
+- Checkout accepts an idempotency key.
+- Vendor fulfilment records are created for each distinct vendor in the order.
+- Vendors cannot access another vendor's fulfilment or update another vendor's status.
+- Parent order status advances as vendor fulfilments progress.
+- Buyer/admin cancellation restores stock only before any vendor has started packing or shipping.
+
+## Payments and external services
+
+The current checkout does **not** collect money. It creates a marketplace order only. Payment gateway integration must be configured separately with a merchant account, verified webhook signatures, idempotency, refund handling, and reconciliation. Never store card details in this application.
+
+Analytics/error monitoring can be added through an application SDK and server-side configuration. Connecting an assistant plugin does not automatically install that SDK into this Django application.
 
 ## ONDC status
-The ONDC catalog endpoint is only a mock adapter for development. It does **not** establish live ONDC connectivity or conformance. Production participation requires choosing the relevant ONDC domain and participant role, onboarding and subscriber identity, implementing current Beckn/ONDC protocol requirements, signing and verification, callbacks, observability, and conformance testing.
+
+The `/api/ondc/catalog/` endpoint is a mock adapter for development. It is **not live ONDC connectivity** and does not establish ONDC conformance.
+
+A real integration requires selecting the ONDC domain and participant role, completing network onboarding and subscriber identity setup, implementing the applicable Beckn/ONDC APIs and message flows, signing and verifying requests, handling callbacks, observability, and conformance testing against the current official specifications.
 
 ## Verification
-GitHub Actions is configured to install dependencies and run Django checks and tests. The checks have not yet been confirmed passing. Validate the project in CI before deployment; never commit real credentials or production secrets.
+
+GitHub Actions runs dependency installation, `python manage.py check`, and `python manage.py test`. Check the latest workflow result before treating a commit as verified.
+
+## Security notes
+
+- Do not commit `.env`, production secrets, private keys, payment credentials, or ONDC signing keys.
+- Use HTTPS in deployed environments.
+- Use a production database with backups and restricted network access.
+- Configure CORS/CSRF trusted origins and allowed hosts for the actual deployment domain.
+- Review authentication, rate limiting, audit retention, data privacy, and operational monitoring before public launch.
