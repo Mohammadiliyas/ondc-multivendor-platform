@@ -1,6 +1,6 @@
 from django.contrib.auth.models import User
 from rest_framework import serializers
-from .models import Vendor, Category, Product, Order, OrderItem
+from .models import Vendor, Category, Product, Order, OrderItem, VendorFulfillment
 
 class RegisterSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, min_length=8)
@@ -52,3 +52,21 @@ class OrderSerializer(serializers.ModelSerializer):
         read_only_fields = fields
     def get_total(self, obj):
         return str(sum((item.unit_price * item.quantity for item in obj.items.all()), start=0))
+
+
+class VendorFulfillmentSerializer(serializers.ModelSerializer):
+    order_id = serializers.IntegerField(source='order.id', read_only=True)
+    shipping_address = serializers.CharField(source='order.shipping_address', read_only=True)
+    buyer_username = serializers.CharField(source='order.buyer.username', read_only=True)
+    items = serializers.SerializerMethodField()
+    subtotal = serializers.SerializerMethodField()
+    class Meta:
+        model = VendorFulfillment
+        fields = ('id', 'order_id', 'status', 'tracking_reference', 'shipping_address', 'buyer_username', 'items', 'subtotal', 'created_at', 'updated_at')
+        read_only_fields = fields
+    def get_items(self, obj):
+        items = obj.order.items.filter(product__vendor=obj.vendor).select_related('product')
+        return OrderItemSerializer(items, many=True).data
+    def get_subtotal(self, obj):
+        items = obj.order.items.filter(product__vendor=obj.vendor)
+        return str(sum((item.unit_price * item.quantity for item in items), start=0))
