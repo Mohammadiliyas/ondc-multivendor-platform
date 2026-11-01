@@ -2,11 +2,13 @@ from django.contrib import admin
 from django.urls import path, include
 from django.http import JsonResponse
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
+from store.views import home
 
 def health(request):
     return JsonResponse({'status': 'ok', 'service': 'ondc-multivendor-platform', 'ondc_mode': 'mock'})
 
 urlpatterns = [
+    path('', home, name='home'),
     path('admin/', admin.site.urls),
     path('api/health/', health),
     path('api/schema/', SpectacularAPIView.as_view(), name='schema'),
