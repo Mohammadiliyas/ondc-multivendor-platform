@@ -125,3 +125,36 @@ class PaymentWebhookEvent(models.Model):
     payment = models.ForeignKey(PaymentRecord, on_delete=models.SET_NULL, null=True, blank=True, related_name='webhook_events')
     processed = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
+
+
+class RefundRecord(models.Model):
+    class Status(models.TextChoices):
+        PENDING = 'PENDING', 'Pending'
+        PROCESSED = 'PROCESSED', 'Processed'
+        FAILED = 'FAILED', 'Failed'
+    payment = models.ForeignKey(PaymentRecord, on_delete=models.PROTECT, related_name='refunds')
+    razorpay_refund_id = models.CharField(max_length=180, unique=True, null=True, blank=True)
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING)
+    reason = models.CharField(max_length=255, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+class VendorSettlement(models.Model):
+    class Status(models.TextChoices):
+        PENDING = 'PENDING', 'Pending'
+        READY = 'READY', 'Ready for manual payout'
+        PAID = 'PAID', 'Paid'
+        HELD = 'HELD', 'Held'
+    order = models.ForeignKey(Order, on_delete=models.PROTECT, related_name='vendor_settlements')
+    vendor = models.ForeignKey(Vendor, on_delete=models.PROTECT, related_name='settlements')
+    gross_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    platform_fee = models.DecimalField(max_digits=12, decimal_places=2)
+    net_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING)
+    payout_reference = models.CharField(max_length=180, blank=True)
+    paid_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['order', 'vendor'], name='unique_order_vendor_settlement')]
