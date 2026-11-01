@@ -1,4 +1,9 @@
 from django.contrib.auth.models import User
+from django.conf import settings
+from django.utils import timezone
+from decimal import Decimal
+import hashlib, hmac, json
+import razorpay
 from django.db import transaction
 from django.db.models import Sum
 from rest_framework import generics, viewsets, status
@@ -7,7 +12,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.exceptions import PermissionDenied, ValidationError
-from .models import Vendor, Category, Product, Order, OrderItem, InventoryMovement, AuditLog, VendorFulfillment
+from .models import Vendor, Category, Product, Order, OrderItem, InventoryMovement, AuditLog, VendorFulfillment, PaymentRecord, PaymentWebhookEvent
 from .serializers import RegisterSerializer, VendorSerializer, CategorySerializer, ProductSerializer, CreateOrderSerializer, OrderSerializer, VendorFulfillmentSerializer
 
 class RegisterView(generics.CreateAPIView):
@@ -309,3 +314,141 @@ class VendorFulfillmentStatusView(APIView):
             fulfillment.order.save(update_fields=['status'])
             AuditLog.objects.create(actor=request.user, action='vendor.fulfillment_status_changed', object_type='VendorFulfillment', object_id=str(fulfillment.pk), details={'status':new_status,'order_id':fulfillment.order_id})
         return Response(VendorFulfillmentSerializer(fulfillment).data)
+
+
+class RazorpayCreateOrderView(APIView):
+    permission_classes = [IsAuthenticated]
+    def post(self, request, pk):
+        if not settings.RAZORPAY_KEY_ID or not settings.RAZORPAY_KEY_SECRET:
+            return Response({'detail':'Razorpay is not configured. Add test credentials to the server environment.'}, status=503)
+        try:
+            order = Order.objects.prefetch_related('items').get(pk=pk, buyer=request.user)
+        except Order.DoesNotExist:
+            return Response({'detail':'Order not found.'}, status=404)
+        if order.status == Order.Status.CANCELLED:
+            return Response({'detail':'Cancelled orders cannot be paid.'}, status=409)
+        amount = sum((item.unit_price * item.quantity for item in order.items.all()), start=Decimal('0.00')).quantize(Decimal('0.01'))
+        if amount <= 0:
+            return Response({'detail':'Order amount must be greater than zero.'}, status=400)
+        payment = PaymentRecord.objects.filter(order=order, provider='razorpay').first()
+        if payment and payment.status == PaymentRecord.Status.PAID:
+            return Response({'detail':'This order is already paid.'}, status=409)
+        client = razorpay.Client(auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET))
+        if payment and payment.razorpay_order_id:
+            rp_order_id = payment.razorpay_order_id
+        else:
+            try:
+                rp_order = client.order.create(data={
+                    'amount': int(amount * 100), 'currency': settings.RAZORPAY_CURRENCY,
+                    'receipt': f'market-{order.pk}', 'notes': {'marketplace_order_id': str(order.pk)}
+                })
+            except Exception:
+                return Response({'detail':'Unable to create Razorpay order. Check server credentials and gateway configuration.'}, status=502)
+            rp_order_id = rp_order['id']
+            if payment is None:
+                payment = PaymentRecord.objects.create(order=order, provider='razorpay', amount=amount, currency=settings.RAZORPAY_CURRENCY, razorpay_order_id=rp_order_id)
+            else:
+                payment.amount=amount
+                payment.currency=settings.RAZORPAY_CURRENCY
+                payment.razorpay_order_id=rp_order_id
+                payment.status=PaymentRecord.Status.PENDING
+                payment.save(update_fields=['amount','currency','razorpay_order_id','status','updated_at'])
+        return Response({
+            'key_id': settings.RAZORPAY_KEY_ID, 'razorpay_order_id': rp_order_id,
+            'amount': int(amount * 100), 'currency': settings.RAZORPAY_CURRENCY,
+            'payment_record_id': payment.pk, 'order_id': order.pk,
+            'name': 'MarketLane Marketplace', 'description': f'Payment for order #{order.pk}'
+        }, status=200)
+
+
+class RazorpayVerifyPaymentView(APIView):
+    permission_classes = [IsAuthenticated]
+    def post(self, request):
+        order_id = request.data.get('razorpay_order_id')
+        payment_id = request.data.get('razorpay_payment_id')
+        signature = request.data.get('razorpay_signature')
+        if not all([order_id, payment_id, signature]):
+            raise ValidationError({'detail':'Missing Razorpay payment verification fields.'})
+        try:
+            payment = PaymentRecord.objects.select_related('order').get(razorpay_order_id=order_id, order__buyer=request.user)
+        except PaymentRecord.DoesNotExist:
+            return Response({'detail':'Payment record not found.'}, status=404)
+        if not settings.RAZORPAY_KEY_SECRET:
+            return Response({'detail':'Razorpay is not configured.'}, status=503)
+        expected = hmac.new(settings.RAZORPAY_KEY_SECRET.encode(), f'{order_id}|{payment_id}'.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, str(signature)):
+            return Response({'detail':'Invalid Razorpay payment signature.'}, status=400)
+        client = razorpay.Client(auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET))
+        try:
+            gateway_payment = client.payment.fetch(payment_id)
+        except Exception:
+            return Response({'detail':'Could not verify payment status with Razorpay. The webhook will reconcile the final state.'}, status=502)
+        if gateway_payment.get('order_id') != order_id:
+            return Response({'detail':'Payment does not belong to this Razorpay order.'}, status=400)
+        if int(gateway_payment.get('amount', -1)) != int(payment.amount * 100) or gateway_payment.get('currency') != payment.currency:
+            return Response({'detail':'Payment amount or currency mismatch.'}, status=400)
+        gateway_status = gateway_payment.get('status')
+        if gateway_status not in ('authorized','captured'):
+            return Response({'detail':f'Payment is not successful (gateway status: {gateway_status}).'}, status=409)
+        with transaction.atomic():
+            payment = PaymentRecord.objects.select_for_update().get(pk=payment.pk)
+            payment.razorpay_payment_id = payment_id
+            payment.signature_verified = True
+            payment.status = PaymentRecord.Status.PAID if gateway_status == 'captured' else PaymentRecord.Status.AUTHORIZED
+            if gateway_status == 'captured':
+                payment.paid_at = timezone.now()
+            payment.save(update_fields=['razorpay_payment_id','signature_verified','status','paid_at','updated_at'])
+            if payment.status == PaymentRecord.Status.PAID and payment.order.status == Order.Status.PLACED:
+                payment.order.status = Order.Status.CONFIRMED
+                payment.order.save(update_fields=['status'])
+            AuditLog.objects.create(actor=request.user, action='payment.verified', object_type='PaymentRecord', object_id=str(payment.pk), details={'gateway_status':gateway_status})
+        return Response({'status':payment.status,'order_id':payment.order_id})
+
+
+class RazorpayWebhookView(APIView):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+    def post(self, request):
+        secret = settings.RAZORPAY_WEBHOOK_SECRET
+        signature = request.headers.get('X-Razorpay-Signature', '')
+        event_id = request.headers.get('X-Razorpay-Event-Id', '')
+        if not secret:
+            return Response({'detail':'Webhook secret is not configured.'}, status=503)
+        expected = hmac.new(secret.encode(), request.body, hashlib.sha256).hexdigest()
+        if not signature or not hmac.compare_digest(expected, signature):
+            return Response({'detail':'Invalid webhook signature.'}, status=400)
+        if not event_id:
+            return Response({'detail':'Missing Razorpay event ID.'}, status=400)
+        try:
+            payload = json.loads(request.body.decode('utf-8'))
+            event_type = payload.get('event','')
+            entity = payload.get('payload',{}).get('payment',{}).get('entity',{})
+            rp_order_id = entity.get('order_id')
+            rp_payment_id = entity.get('id')
+        except (ValueError, AttributeError):
+            return Response({'detail':'Invalid webhook payload.'}, status=400)
+        with transaction.atomic():
+            event, created = PaymentWebhookEvent.objects.get_or_create(
+                provider_event_id=event_id, defaults={'event_type':event_type}
+            )
+            if not created and event.processed:
+                return Response({'status':'duplicate_ignored'})
+            payment = PaymentRecord.objects.select_for_update().filter(razorpay_order_id=rp_order_id).first() if rp_order_id else None
+            if payment:
+                if event_type in ('payment.captured','order.paid'):
+                    payment.status=PaymentRecord.Status.PAID
+                    payment.razorpay_payment_id=rp_payment_id or payment.razorpay_payment_id
+                    payment.signature_verified=True
+                    payment.paid_at=timezone.now()
+                    payment.save(update_fields=['status','razorpay_payment_id','signature_verified','paid_at','updated_at'])
+                    if payment.order.status == Order.Status.PLACED:
+                        payment.order.status=Order.Status.CONFIRMED
+                        payment.order.save(update_fields=['status'])
+                elif event_type == 'payment.failed' and payment.status not in (PaymentRecord.Status.PAID, PaymentRecord.Status.REFUNDED):
+                    payment.status=PaymentRecord.Status.FAILED
+                    payment.failure_reason=str(entity.get('error_description') or 'Payment failed')[:255]
+                    payment.save(update_fields=['status','failure_reason','updated_at'])
+                event.payment=payment
+            event.processed=True
+            event.save(update_fields=['processed','payment'])
+        return Response({'status':'processed'})
