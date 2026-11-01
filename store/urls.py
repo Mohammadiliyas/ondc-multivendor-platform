@@ -2,7 +2,7 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from . import views
-from .api_views import RegisterView, CategoryViewSet, ProductViewSet, VendorViewSet, VendorDashboardView, VendorOrderListView, OrderCreateView, OrderListView, OrderCancelView, VendorOrderStatusView, AdminDashboardView, AdminOrderStatusView, AdminAuditLogView, VendorFulfillmentListView, VendorFulfillmentStatusView, RazorpayCreateOrderView, RazorpayVerifyPaymentView, RazorpayWebhookView, AdminCreateRefundView, VendorSettlementListView, AdminMarkSettlementPaidView, AdminCreateRefundView, VendorSettlementListView, AdminMarkSettlementPaidView
+from .api_views import RegisterView, VerifySignupOTPView, ResendSignupOTPView, CategoryViewSet, ProductViewSet, VendorViewSet, VendorDashboardView, VendorOrderListView, OrderCreateView, OrderListView, OrderCancelView, VendorOrderStatusView, AdminDashboardView, AdminOrderStatusView, AdminAuditLogView, VendorFulfillmentListView, VendorFulfillmentStatusView, RazorpayCreateOrderView, RazorpayVerifyPaymentView, RazorpayWebhookView, AdminCreateRefundView, VendorSettlementListView, AdminMarkSettlementPaidView, AdminCreateRefundView, VendorSettlementListView, AdminMarkSettlementPaidView
 
 router = DefaultRouter()
 router.register('categories', CategoryViewSet, basename='category')
@@ -11,6 +11,8 @@ router.register('vendors', VendorViewSet, basename='vendor')
 
 urlpatterns = [
     path('auth/register/', RegisterView.as_view(), name='register'),
+    path('auth/verify-otp/', VerifySignupOTPView.as_view(), name='verify-signup-otp'),
+    path('auth/resend-otp/', ResendSignupOTPView.as_view(), name='resend-signup-otp'),
     path('token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
     path('dashboard/vendor/', VendorDashboardView.as_view(), name='vendor-dashboard'),
