@@ -100,3 +100,24 @@ class VendorFulfillment(models.Model):
         ordering = ['created_at']
     def __str__(self):
         return f'Order {self.order_id} · {self.vendor.store_name}'
+
+
+class VendorFulfillment(models.Model):
+    class Status(models.TextChoices):
+        PENDING = 'PENDING', 'Pending'
+        CONFIRMED = 'CONFIRMED', 'Confirmed'
+        PACKED = 'PACKED', 'Packed'
+        SHIPPED = 'SHIPPED', 'Shipped'
+        DELIVERED = 'DELIVERED', 'Delivered'
+        CANCELLED = 'CANCELLED', 'Cancelled'
+    order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name='vendor_fulfillments')
+    vendor = models.ForeignKey(Vendor, on_delete=models.PROTECT, related_name='fulfillments')
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING)
+    tracking_reference = models.CharField(max_length=180, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['order', 'vendor'], name='unique_order_vendor_fulfillment')]
+        ordering = ['created_at']
+    def __str__(self):
+        return f'Order {self.order_id} · {self.vendor.store_name}'
