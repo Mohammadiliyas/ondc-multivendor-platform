@@ -39,12 +39,13 @@ def _deliver_signup_otp(user, channel, code):
     phone = user.verification.phone
     payload = json.dumps({
         'template_id': settings.MSG91_TEMPLATE_ID,
-        'mobile': phone.lstrip('+'),
-        'otp': code,
-        'otp_expiry': max(1, settings.MSG91_OTP_EXPIRY_SECONDS // 60),
+        'recipients': [{
+            'mobiles': phone.lstrip('+'),
+            'var1': code,
+        }],
     }).encode('utf-8')
     request = Request(
-        'https://control.msg91.com/api/v5/otp',
+        'https://control.msg91.com/api/v5/flow/',
         data=payload,
         headers={'Content-Type': 'application/json', 'authkey': settings.MSG91_AUTH_KEY},
         method='POST',
@@ -59,6 +60,8 @@ def _deliver_signup_otp(user, channel, code):
 
 
 def _issue_signup_otps(user, enforce_cooldown=True):
+    if SignupOTP.objects.filter(user=user, created_at__gte=timezone.now() - timedelta(hours=24)).count() >= 10:
+        raise ValidationError({'detail': 'OTP request limit reached. Try again after 24 hours.'})
     latest = {}
     for row in SignupOTP.objects.filter(user=user, verified_at__isnull=True).order_by('channel', '-created_at'):
         latest.setdefault(row.channel, row)
@@ -502,6 +505,8 @@ class VendorFulfillmentStatusView(APIView):
 class RazorpayCreateOrderView(APIView):
     permission_classes = [IsAuthenticated]
     def post(self, request, pk):
+        if settings.RAZORPAY_MODE == 'test' and not settings.RAZORPAY_KEY_ID.startswith('rzp_test_'):
+            return Response({'detail':'Razorpay is locked to test mode. Configure an rzp_test_ Key ID and matching test Key Secret.'}, status=503)
         if not settings.RAZORPAY_KEY_ID or not settings.RAZORPAY_KEY_SECRET:
             return Response({'detail':'Razorpay is not configured. Add test credentials to the server environment.'}, status=503)
         try:
