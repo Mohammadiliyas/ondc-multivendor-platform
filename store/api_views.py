@@ -1,4 +1,10 @@
 from django.contrib.auth.models import User
+from django.core.mail import send_mail
+from django.contrib.auth.hashers import make_password, check_password
+from datetime import timedelta
+import secrets, json as json_module
+from urllib.request import Request, urlopen
+from urllib.error import URLError, HTTPError
 from django.conf import settings
 from django.utils import timezone
 from decimal import Decimal
@@ -12,13 +18,157 @@ from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.exceptions import PermissionDenied, ValidationError
-from .models import Vendor, Category, Product, Order, OrderItem, InventoryMovement, AuditLog, VendorFulfillment, PaymentRecord, PaymentWebhookEvent, RefundRecord, VendorSettlement
+from .models import Vendor, Category, Product, Order, OrderItem, InventoryMovement, AuditLog, VendorFulfillment, PaymentRecord, PaymentWebhookEvent, RefundRecord, VendorSettlement, UserVerification, SignupOTP
 from .serializers import RegisterSerializer, VendorSerializer, CategorySerializer, ProductSerializer, CreateOrderSerializer, OrderSerializer, VendorFulfillmentSerializer
 
-class RegisterView(generics.CreateAPIView):
-    queryset = User.objects.all()
+
+def _deliver_signup_otp(user, channel, code):
+    if channel == 'email':
+        if not settings.EMAIL_HOST or not settings.EMAIL_HOST_USER or not settings.EMAIL_HOST_PASSWORD:
+            raise RuntimeError('Email OTP is not configured. Set SMTP environment variables.')
+        sent = send_mail(
+            'Your MarketLane verification code',
+            f'Your MarketLane email verification code is {code}. It expires in {settings.OTP_EXPIRY_MINUTES} minutes. Do not share this code.',
+            settings.DEFAULT_FROM_EMAIL, [user.email], fail_silently=False,
+        )
+        if sent != 1:
+            raise RuntimeError('Email OTP delivery failed.')
+        return
+    if not settings.MSG91_AUTH_KEY or not settings.MSG91_TEMPLATE_ID:
+        raise RuntimeError('SMS OTP is not configured. Set MSG91_AUTH_KEY and MSG91_TEMPLATE_ID.')
+    phone = user.verification.phone
+    payload = json.dumps({
+        'template_id': settings.MSG91_TEMPLATE_ID,
+        'mobile': phone.lstrip('+'),
+        'otp': code,
+        'otp_expiry': max(1, settings.MSG91_OTP_EXPIRY_SECONDS // 60),
+    }).encode('utf-8')
+    request = Request(
+        'https://control.msg91.com/api/v5/otp',
+        data=payload,
+        headers={'Content-Type': 'application/json', 'authkey': settings.MSG91_AUTH_KEY},
+        method='POST',
+    )
+    try:
+        with urlopen(request, timeout=12) as response:
+            result = json.loads(response.read().decode('utf-8'))
+            if response.status >= 300 or str(result.get('type', '')).lower() == 'error':
+                raise RuntimeError('SMS provider rejected the OTP request.')
+    except (HTTPError, URLError, TimeoutError, ValueError) as exc:
+        raise RuntimeError('SMS OTP delivery failed. Check MSG91 configuration.') from exc
+
+
+def _issue_signup_otps(user, enforce_cooldown=True):
+    latest = {}
+    for row in SignupOTP.objects.filter(user=user, verified_at__isnull=True).order_by('channel', '-created_at'):
+        latest.setdefault(row.channel, row)
+    if enforce_cooldown and latest:
+        recent = max(row.created_at for row in latest.values())
+        wait = settings.OTP_RESEND_SECONDS - int((timezone.now() - recent).total_seconds())
+        if wait > 0:
+            raise ValidationError({'detail': f'Wait {wait} seconds before requesting new OTPs.'})
+    codes = {'email': f'{secrets.randbelow(1000000):06d}', 'sms': f'{secrets.randbelow(1000000):06d}'}
+    expires = timezone.now() + timedelta(minutes=settings.OTP_EXPIRY_MINUTES)
+    with transaction.atomic():
+        for channel, code in codes.items():
+            SignupOTP.objects.create(user=user, channel=channel, code_hash=make_password(code), expires_at=expires)
+    failures = []
+    for channel, code in codes.items():
+        try:
+            _deliver_signup_otp(user, channel, code)
+        except Exception as exc:
+            failures.append(f'{channel}: {str(exc)}')
+    if failures:
+        raise RuntimeError('OTP delivery incomplete. ' + ' '.join(failures))
+    return True
+
+
+class RegisterView(generics.GenericAPIView):
     serializer_class = RegisterSerializer
     permission_classes = [AllowAny]
+    def post(self, request):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = serializer.save()
+        try:
+            _issue_signup_otps(user, enforce_cooldown=False)
+        except Exception as exc:
+            return Response({
+                'detail': 'Your account is pending verification, but OTP delivery was not completed. Check server email/SMS configuration and request OTPs again.',
+                'delivery_error': str(exc),
+                'username': user.username,
+            }, status=503)
+        return Response({
+            'detail': 'Separate verification codes were sent to your email address and mobile number. Both are required.',
+            'username': user.username,
+            'expires_in_seconds': settings.OTP_EXPIRY_MINUTES * 60,
+        }, status=status.HTTP_201_CREATED)
+
+
+class ResendSignupOTPView(APIView):
+    permission_classes = [AllowAny]
+    def post(self, request):
+        username = str(request.data.get('username', '')).strip()
+        user = User.objects.filter(username=username, is_active=False).first()
+        if not user:
+            return Response({'detail': 'Pending signup account not found.'}, status=404)
+        if not hasattr(user, 'verification') or user.verification.is_verified:
+            return Response({'detail': 'This account does not require verification.'}, status=400)
+        try:
+            _issue_signup_otps(user)
+        except ValidationError:
+            raise
+        except Exception as exc:
+            return Response({'detail': 'OTP delivery failed. Check email/SMS provider configuration.', 'delivery_error': str(exc)}, status=503)
+        return Response({'detail': 'New email and SMS OTPs sent.', 'expires_in_seconds': settings.OTP_EXPIRY_MINUTES * 60})
+
+
+class VerifySignupOTPView(APIView):
+    permission_classes = [AllowAny]
+    def post(self, request):
+        username = str(request.data.get('username', '')).strip()
+        email_code = str(request.data.get('email_otp', '')).strip()
+        sms_code = str(request.data.get('sms_otp', '')).strip()
+        if not username or not email_code or not sms_code:
+            raise ValidationError({'detail': 'Username, email_otp and sms_otp are all required.'})
+        user = User.objects.filter(username=username, is_active=False).first()
+        if not user:
+            return Response({'detail': 'Pending signup account not found.'}, status=404)
+        verification = getattr(user, 'verification', None)
+        if not verification:
+            return Response({'detail': 'Signup verification record not found.'}, status=400)
+        errors = {}
+        with transaction.atomic():
+            for channel, supplied in (('email', email_code), ('sms', sms_code)):
+                challenge = SignupOTP.objects.select_for_update().filter(
+                    user=user, channel=channel, verified_at__isnull=True
+                ).order_by('-created_at').first()
+                if not challenge:
+                    errors[channel] = 'Request a new OTP.'
+                elif challenge.expires_at <= timezone.now():
+                    errors[channel] = 'OTP expired. Request a new one.'
+                elif challenge.attempts >= settings.OTP_MAX_ATTEMPTS:
+                    errors[channel] = 'Maximum attempts reached. Request a new OTP.'
+                elif not check_password(supplied, challenge.code_hash):
+                    challenge.attempts += 1
+                    challenge.save(update_fields=['attempts'])
+                    errors[channel] = 'Incorrect OTP.'
+                else:
+                    challenge.verified_at = timezone.now()
+                    challenge.save(update_fields=['verified_at'])
+                    if channel == 'email':
+                        verification.email_verified = True
+                    else:
+                        verification.phone_verified = True
+            verification.save(update_fields=['email_verified', 'phone_verified'])
+            if errors:
+                return Response({'detail': 'One or both OTPs could not be verified.', 'errors': errors}, status=400)
+            if verification.is_verified:
+                user.is_active = True
+                user.save(update_fields=['is_active'])
+        return Response({'detail': 'Email and mobile number verified. Your account is active. You can now sign in.'})
+
+
 
 class CategoryViewSet(viewsets.ModelViewSet):
     queryset = Category.objects.all().order_by('name')
