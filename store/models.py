@@ -50,12 +50,30 @@ class InventoryMovement(models.Model):
     reason = models.CharField(max_length=120)
     created_at = models.DateTimeField(auto_now_add=True)
 
+
 class PaymentRecord(models.Model):
+    class Status(models.TextChoices):
+        PENDING = 'PENDING', 'Pending'
+        AUTHORIZED = 'AUTHORIZED', 'Authorized'
+        PAID = 'PAID', 'Paid'
+        FAILED = 'FAILED', 'Failed'
+        REFUNDED = 'REFUNDED', 'Refunded'
     order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name='payments')
-    provider = models.CharField(max_length=80, default='manual')
-    status = models.CharField(max_length=32, default='PENDING')
+    provider = models.CharField(max_length=80, default='razorpay')
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.PENDING)
     provider_reference = models.CharField(max_length=180, blank=True)
+    amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    currency = models.CharField(max_length=3, default='INR')
+    razorpay_order_id = models.CharField(max_length=180, unique=True, null=True, blank=True)
+    razorpay_payment_id = models.CharField(max_length=180, unique=True, null=True, blank=True)
+    signature_verified = models.BooleanField(default=False)
+    paid_at = models.DateTimeField(null=True, blank=True)
+    failure_reason = models.CharField(max_length=255, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['order', 'provider'], name='unique_order_payment_provider')]
+
 
 class Shipment(models.Model):
     order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name='shipments')
@@ -100,3 +118,10 @@ class VendorFulfillment(models.Model):
         ordering = ['created_at']
     def __str__(self):
         return f'Order {self.order_id} · {self.vendor.store_name}'
+
+class PaymentWebhookEvent(models.Model):
+    provider_event_id = models.CharField(max_length=180, unique=True)
+    event_type = models.CharField(max_length=80)
+    payment = models.ForeignKey(PaymentRecord, on_delete=models.SET_NULL, null=True, blank=True, related_name='webhook_events')
+    processed = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
