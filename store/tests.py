@@ -33,7 +33,8 @@ class MarketplaceAPITests(TestCase):
         other = User.objects.create_user(username='seller2', password='StrongPass123!')
         Vendor.objects.create(owner=other, store_name='Other Store', is_approved=True)
         self.auth(other)
-        self.assertEqual(len(self.client.get('/api/products/').json()), 0)
+        # Approved products are public; cross-vendor writes must still be blocked.
+        self.assertEqual(len(self.client.get('/api/products/').json()), 1)
         response = self.client.patch(f'/api/products/{self.product.pk}/', {'price':'1.00'}, format='json')
         self.assertEqual(response.status_code, 404)
     def test_buyer_checkout_decrements_stock_and_snapshots_price(self):
