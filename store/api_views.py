@@ -12,7 +12,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.exceptions import PermissionDenied, ValidationError
-from .models import Vendor, Category, Product, Order, OrderItem, InventoryMovement, AuditLog, VendorFulfillment, PaymentRecord, PaymentWebhookEvent
+from .models import Vendor, Category, Product, Order, OrderItem, InventoryMovement, AuditLog, VendorFulfillment, PaymentRecord, PaymentWebhookEvent, RefundRecord, VendorSettlement
 from .serializers import RegisterSerializer, VendorSerializer, CategorySerializer, ProductSerializer, CreateOrderSerializer, OrderSerializer, VendorFulfillmentSerializer
 
 class RegisterView(generics.CreateAPIView):
@@ -310,6 +310,19 @@ class VendorFulfillmentStatusView(APIView):
             if 'tracking_reference' in request.data:
                 fulfillment.tracking_reference = str(request.data['tracking_reference'])[:180]
             fulfillment.save(update_fields=['status','tracking_reference','updated_at'])
+            if new_status == VendorFulfillment.Status.DELIVERED:
+                vendor_gross = sum((item.unit_price * item.quantity for item in fulfillment.order.items.filter(product__vendor=vendor)), start=Decimal('0.00')).quantize(Decimal('0.01'))
+                fee_rate = Decimal(str(getattr(settings, 'PLATFORM_COMMISSION_PERCENT', 10)))
+                fee = (vendor_gross * fee_rate / Decimal('100')).quantize(Decimal('0.01'))
+                has_refund = fulfillment.order.payments.filter(refunds__status=RefundRecord.Status.PROCESSED).exists()
+                VendorSettlement.objects.get_or_create(
+                    order=fulfillment.order, vendor=vendor,
+                    defaults={
+                        'gross_amount':vendor_gross, 'platform_fee':fee,
+                        'net_amount':vendor_gross-fee,
+                        'status':VendorSettlement.Status.HELD if has_refund else VendorSettlement.Status.READY
+                    }
+                )
             rows = list(fulfillment.order.vendor_fulfillments.values_list('status', flat=True))
             if rows and all(value == VendorFulfillment.Status.DELIVERED for value in rows):
                 fulfillment.order.status = Order.Status.DELIVERED
@@ -430,7 +443,9 @@ class RazorpayWebhookView(APIView):
         try:
             payload = json.loads(request.body.decode('utf-8'))
             event_type = payload.get('event','')
-            entity = payload.get('payload',{}).get('payment',{}).get('entity',{})
+            payment_entity = payload.get('payload',{}).get('payment',{}).get('entity',{})
+            refund_entity = payload.get('payload',{}).get('refund',{}).get('entity',{})
+            entity = payment_entity or refund_entity
             rp_order_id = entity.get('order_id')
             rp_payment_id = entity.get('id')
         except (ValueError, AttributeError):
@@ -459,6 +474,85 @@ class RazorpayWebhookView(APIView):
                     payment.failure_reason=str(entity.get('error_description') or 'Payment failed')[:255]
                     payment.save(update_fields=['status','failure_reason','updated_at'])
                 event.payment=payment
+            if event_type in ('refund.processed','refund.failed'):
+                refund_id = refund_entity.get('id')
+                refund = RefundRecord.objects.select_for_update().filter(razorpay_refund_id=refund_id).first() if refund_id else None
+                if refund:
+                    refund.status = RefundRecord.Status.PROCESSED if event_type == 'refund.processed' else RefundRecord.Status.FAILED
+                    refund.save(update_fields=['status','updated_at'])
+                    payment = refund.payment
+                    if event_type == 'refund.processed':
+                        total_refunded = payment.refunds.filter(status=RefundRecord.Status.PROCESSED).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+                        if total_refunded >= payment.amount:
+                            payment.status = PaymentRecord.Status.REFUNDED
+                            payment.save(update_fields=['status','updated_at'])
+                        payment.order.vendor_settlements.exclude(status=VendorSettlement.Status.PAID).update(status=VendorSettlement.Status.HELD)
+                    event.payment = payment
             event.processed=True
             event.save(update_fields=['processed','payment'])
         return Response({'status':'processed'})
+
+
+class AdminCreateRefundView(APIView):
+    permission_classes = [IsAdminUser]
+    def post(self, request, payment_id):
+        if not settings.RAZORPAY_KEY_ID or not settings.RAZORPAY_KEY_SECRET:
+            return Response({'detail':'Razorpay is not configured.'}, status=503)
+        try:
+            payment = PaymentRecord.objects.select_related('order').get(pk=payment_id)
+        except PaymentRecord.DoesNotExist:
+            return Response({'detail':'Payment not found.'}, status=404)
+        if payment.status != PaymentRecord.Status.PAID or not payment.razorpay_payment_id:
+            return Response({'detail':'Only captured payments can be refunded.'}, status=409)
+        existing = payment.refunds.exclude(status=RefundRecord.Status.FAILED).first()
+        if existing:
+            return Response({'id':existing.pk,'status':existing.status,'amount':str(existing.amount),'razorpay_refund_id':existing.razorpay_refund_id}, status=200)
+        amount = payment.amount
+        reason = str(request.data.get('reason','Customer refund'))[:255]
+        client = razorpay.Client(auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET))
+        try:
+            gateway_refund = client.payment.refund(payment.razorpay_payment_id, {'amount':int(amount*100),'notes':{'marketplace_order_id':str(payment.order_id),'reason':reason}})
+        except Exception:
+            return Response({'detail':'Razorpay did not accept the refund request. Verify payment capture and gateway response.'}, status=502)
+        refund = RefundRecord.objects.create(payment=payment, razorpay_refund_id=gateway_refund.get('id'), amount=amount, status=RefundRecord.Status.PENDING, reason=reason)
+        AuditLog.objects.create(actor=request.user, action='payment.refund_requested', object_type='RefundRecord', object_id=str(refund.pk), details={'payment_id':payment.pk,'amount':str(amount)})
+        return Response({'id':refund.pk,'status':refund.status,'amount':str(refund.amount),'razorpay_refund_id':refund.razorpay_refund_id}, status=201)
+
+
+class VendorSettlementListView(generics.ListAPIView):
+    permission_classes = [IsAuthenticated]
+    def get(self, request):
+        vendor = getattr(request.user, 'vendor_profile', None)
+        if not request.user.is_staff and not vendor:
+            raise PermissionDenied('Vendor account required.')
+        queryset = VendorSettlement.objects.select_related('order','vendor')
+        if not request.user.is_staff:
+            queryset = queryset.filter(vendor=vendor)
+        data = [{
+            'id':row.pk,'order_id':row.order_id,'vendor_id':row.vendor_id,
+            'gross_amount':str(row.gross_amount),'platform_fee':str(row.platform_fee),
+            'net_amount':str(row.net_amount),'status':row.status,
+            'payout_reference':row.payout_reference,'paid_at':row.paid_at
+        } for row in queryset.order_by('-created_at')]
+        return Response(data)
+
+
+class AdminMarkSettlementPaidView(APIView):
+    permission_classes = [IsAdminUser]
+    def post(self, request, pk):
+        reference = str(request.data.get('payout_reference','')).strip()[:180]
+        if not reference:
+            raise ValidationError({'payout_reference':'A bank/UPI transfer reference is required.'})
+        with transaction.atomic():
+            try:
+                row = VendorSettlement.objects.select_for_update().get(pk=pk)
+            except VendorSettlement.DoesNotExist:
+                return Response({'detail':'Settlement not found.'}, status=404)
+            if row.status != VendorSettlement.Status.READY:
+                return Response({'detail':'Only ready settlements can be marked paid.'}, status=409)
+            row.status=VendorSettlement.Status.PAID
+            row.payout_reference=reference
+            row.paid_at=timezone.now()
+            row.save(update_fields=['status','payout_reference','paid_at','updated_at'])
+            AuditLog.objects.create(actor=request.user, action='vendor.settlement_marked_paid', object_type='VendorSettlement', object_id=str(row.pk), details={'reference':reference,'net_amount':str(row.net_amount)})
+        return Response({'id':row.pk,'status':row.status,'payout_reference':row.payout_reference,'net_amount':str(row.net_amount)})
