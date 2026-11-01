@@ -480,6 +480,8 @@ class RazorpayWebhookView(APIView):
                 refund_id = refund_entity.get('id')
                 refund = RefundRecord.objects.select_for_update().filter(razorpay_refund_id=refund_id).first() if refund_id else None
                 if refund:
+                    if event_type == 'refund.processed' and int(refund_entity.get('amount', -1)) != int(refund.amount * 100):
+                        return Response({'detail':'Refund webhook amount does not match the marketplace refund record.'}, status=400)
                     refund.status = RefundRecord.Status.PROCESSED if event_type == 'refund.processed' else RefundRecord.Status.FAILED
                     refund.save(update_fields=['status','updated_at'])
                     payment = refund.payment
@@ -489,6 +491,8 @@ class RazorpayWebhookView(APIView):
                             payment.status = PaymentRecord.Status.REFUNDED
                             payment.save(update_fields=['status','updated_at'])
                         payment.order.vendor_settlements.exclude(status=VendorSettlement.Status.PAID).update(status=VendorSettlement.Status.HELD)
+                    elif not payment.refunds.exclude(status=RefundRecord.Status.FAILED).exists():
+                        payment.order.vendor_settlements.filter(status=VendorSettlement.Status.HELD).update(status=VendorSettlement.Status.READY)
                     event.payment = payment
             event.processed=True
             event.save(update_fields=['processed','payment'])
@@ -511,12 +515,22 @@ class AdminCreateRefundView(APIView):
             return Response({'id':existing.pk,'status':existing.status,'amount':str(existing.amount),'razorpay_refund_id':existing.razorpay_refund_id}, status=200)
         amount = payment.amount
         reason = str(request.data.get('reason','Customer refund'))[:255]
+        with transaction.atomic():
+            payment = PaymentRecord.objects.select_for_update().get(pk=payment.pk)
+            existing = payment.refunds.exclude(status=RefundRecord.Status.FAILED).first()
+            if existing:
+                return Response({'id':existing.pk,'status':existing.status,'amount':str(existing.amount),'razorpay_refund_id':existing.razorpay_refund_id}, status=200)
+            refund = RefundRecord.objects.create(payment=payment, amount=amount, status=RefundRecord.Status.PENDING, reason=reason)
+            payment.order.vendor_settlements.exclude(status=VendorSettlement.Status.PAID).update(status=VendorSettlement.Status.HELD)
         client = razorpay.Client(auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET))
         try:
             gateway_refund = client.payment.refund(payment.razorpay_payment_id, {'amount':int(amount*100),'notes':{'marketplace_order_id':str(payment.order_id),'reason':reason}})
+            refund.razorpay_refund_id = gateway_refund.get('id')
+            refund.save(update_fields=['razorpay_refund_id','updated_at'])
         except Exception:
+            refund.status = RefundRecord.Status.FAILED
+            refund.save(update_fields=['status','updated_at'])
             return Response({'detail':'Razorpay did not accept the refund request. Verify payment capture and gateway response.'}, status=502)
-        refund = RefundRecord.objects.create(payment=payment, razorpay_refund_id=gateway_refund.get('id'), amount=amount, status=RefundRecord.Status.PENDING, reason=reason)
         AuditLog.objects.create(actor=request.user, action='payment.refund_requested', object_type='RefundRecord', object_id=str(refund.pk), details={'payment_id':payment.pk,'amount':str(amount)})
         return Response({'id':refund.pk,'status':refund.status,'amount':str(refund.amount),'razorpay_refund_id':refund.razorpay_refund_id}, status=201)
 
