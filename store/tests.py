@@ -78,3 +78,35 @@ class MarketplaceAPITests(TestCase):
         self.assertEqual(response.status_code, 200)
         vendor.refresh_from_db()
         self.assertTrue(vendor.is_approved)
+
+    def test_admin_dashboard_is_staff_only(self):
+        self.auth(self.buyer)
+        self.assertEqual(self.client.get('/api/admin/dashboard/').status_code, 403)
+        self.auth(self.admin)
+        response = self.client.get('/api/admin/dashboard/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['vendors_total'], 1)
+        self.assertEqual(response.data['products'], 1)
+
+    def test_admin_can_manage_categories_and_read_audit_logs(self):
+        self.auth(self.buyer)
+        self.assertEqual(self.client.post('/api/categories/', {'name':'Blocked'}, format='json').status_code, 403)
+        self.auth(self.admin)
+        created = self.client.post('/api/categories/', {'name':'Electronics'}, format='json')
+        self.assertEqual(created.status_code, 201)
+        self.assertTrue(Category.objects.filter(name='Electronics').exists())
+        self.assertEqual(self.client.get('/api/admin/audit-logs/').status_code, 200)
+
+    def test_admin_can_cancel_order_and_restore_stock_once(self):
+        self.auth(self.buyer)
+        response = self.client.post('/api/orders/create/', {'shipping_address':'12 Main Road, Hyderabad','idempotency_key':'admin-cancel-test','items':[{'product_id':self.product.pk,'quantity':2}]}, format='json')
+        order_id = response.data['id']
+        self.auth(self.admin)
+        changed = self.client.patch(f'/api/admin/orders/{order_id}/status/', {'status':'CANCELLED'}, format='json')
+        self.assertEqual(changed.status_code, 200)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 5)
+        again = self.client.patch(f'/api/admin/orders/{order_id}/status/', {'status':'CANCELLED'}, format='json')
+        self.assertEqual(again.status_code, 200)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 5)
