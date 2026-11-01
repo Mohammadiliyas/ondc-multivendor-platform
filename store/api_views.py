@@ -134,6 +134,7 @@ class VerifySignupOTPView(APIView):
         username = str(request.data.get('username', '')).strip()
         email_code = str(request.data.get('email_otp', '')).strip()
         sms_code = str(request.data.get('sms_otp', '')).strip()
+        generic_code = str(request.data.get('otp', '')).strip()
         if not username:
             raise ValidationError({'detail': 'Username is required.'})
         user = User.objects.filter(username=username, is_active=False).first()
@@ -145,7 +146,7 @@ class VerifySignupOTPView(APIView):
         errors = {}
         with transaction.atomic():
             required_channel = 'sms' if not verification.phone_verified else 'email'
-            for channel, supplied in ((required_channel, (sms_code or email_code)),):
+            for channel, supplied in ((required_channel, (generic_code or sms_code or email_code)),):
                 if (channel == 'email' and verification.email_verified) or (channel == 'sms' and verification.phone_verified):
                     continue
                 if not supplied:
