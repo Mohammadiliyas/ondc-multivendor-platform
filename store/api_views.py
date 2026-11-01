@@ -108,7 +108,7 @@ class VendorOrderListView(generics.ListAPIView):
         vendor = getattr(self.request.user, 'vendor_profile', None)
         if not vendor or vendor.is_suspended or not vendor.is_approved:
             raise PermissionDenied('An approved, active vendor account is required.')
-        return VendorFulfillment.objects.filter(vendor=vendor).select_related('order','order__buyer','vendor').prefetch_related('order__items').order_by('-created_at')
+        return VendorFulfillment.objects.filter(vendor=vendor, order__payments__provider='razorpay', order__payments__status=PaymentRecord.Status.PAID).select_related('order','order__buyer','vendor').prefetch_related('order__items').distinct().order_by('-created_at')
 
 class OrderCreateView(APIView):
     permission_classes = [IsAuthenticated]
@@ -161,6 +161,8 @@ class OrderCancelView(APIView):
                 raise PermissionDenied('You cannot cancel this order.')
             if order.status not in (Order.Status.PLACED, Order.Status.CONFIRMED):
                 return Response({'detail': 'Only placed or confirmed orders can be cancelled.'}, status=409)
+            if order.payments.filter(status__in=[PaymentRecord.Status.PAID, PaymentRecord.Status.AUTHORIZED]).exists():
+                return Response({'detail':'This order has an authorized or captured payment. A refund must be processed before cancellation.'}, status=409)
             if order.vendor_fulfillments.exclude(status__in=[VendorFulfillment.Status.PENDING, VendorFulfillment.Status.CONFIRMED]).exists():
                 return Response({'detail': 'Cancellation is blocked because at least one vendor has started packing or shipping.'}, status=409)
             for item in order.items.select_related('product').all():
@@ -244,6 +246,8 @@ class AdminOrderStatusView(APIView):
             if old_status == Order.Status.DELIVERED and new_status != Order.Status.DELIVERED:
                 return Response({'detail': 'Delivered orders cannot be moved backwards.'}, status=409)
             if new_status == Order.Status.CANCELLED and old_status != Order.Status.CANCELLED:
+                if order.payments.filter(status__in=[PaymentRecord.Status.PAID, PaymentRecord.Status.AUTHORIZED]).exists():
+                    return Response({'detail':'A payment refund or reversal is required before cancelling this order.'}, status=409)
                 if order.vendor_fulfillments.exclude(status__in=[VendorFulfillment.Status.PENDING, VendorFulfillment.Status.CONFIRMED]).exists():
                     return Response({'detail': 'Cancellation is blocked because a vendor has started packing or shipping.'}, status=409)
                 for item in order.items.all():
@@ -296,6 +300,8 @@ class VendorFulfillmentStatusView(APIView):
                 return Response({'detail': 'Fulfillment not found.'}, status=404)
             if new_status not in self.transitions.get(fulfillment.status, set()):
                 return Response({'detail': f'Invalid transition: {fulfillment.status} to {new_status}.'}, status=409)
+            if not fulfillment.order.payments.filter(provider='razorpay', status=PaymentRecord.Status.PAID).exists():
+                return Response({'detail':'Vendor fulfilment is locked until the buyer payment is captured and verified.'}, status=409)
             if new_status == VendorFulfillment.Status.CANCELLED:
                 return Response({'detail': 'Contact platform support to cancel an individual vendor shipment. Buyer cancellation is handled at order level.'}, status=409)
             fulfillment.status = new_status
@@ -436,6 +442,8 @@ class RazorpayWebhookView(APIView):
             payment = PaymentRecord.objects.select_for_update().filter(razorpay_order_id=rp_order_id).first() if rp_order_id else None
             if payment:
                 if event_type in ('payment.captured','order.paid'):
+                    if int(entity.get('amount', -1)) != int(payment.amount * 100) or entity.get('currency') != payment.currency:
+                        return Response({'detail':'Webhook payment amount or currency does not match the marketplace order.'}, status=400)
                     payment.status=PaymentRecord.Status.PAID
                     payment.razorpay_payment_id=rp_payment_id or payment.razorpay_payment_id
                     payment.signature_verified=True
