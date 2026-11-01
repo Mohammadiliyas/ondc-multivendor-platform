@@ -145,7 +145,7 @@ class VerifySignupOTPView(APIView):
         errors = {}
         with transaction.atomic():
             required_channel = 'sms' if not verification.phone_verified else 'email'
-            for channel, supplied in ((required_channel, sms_code if required_channel == 'sms' else email_code),):
+            for channel, supplied in ((required_channel, (sms_code or email_code)),):
                 if (channel == 'email' and verification.email_verified) or (channel == 'sms' and verification.phone_verified):
                     continue
                 if not supplied:
