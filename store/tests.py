@@ -255,7 +255,7 @@ class MarketplaceAPITests(TestCase):
     def test_razorpay_captured_webhook_is_signed_and_idempotent(self):
         order = self._create_order_for_payment('payment-webhook-captured')
         payment = PaymentRecord.objects.create(order_id=order.data['id'], amount='25.00', razorpay_order_id='order_webhook')
-        body = json.dumps({'event':'payment.captured','payload':{'payment':{'entity':{'id':'pay_captured','order_id':'order_webhook'}}}}).encode()
+        body = json.dumps({'event':'payment.captured','payload':{'payment':{'entity':{'id':'pay_captured','order_id':'order_webhook','amount':2500,'currency':'INR'}}}}).encode()
         signature = hmac.new(b'webhook_test_secret', body, hashlib.sha256).hexdigest()
         headers = {'content_type':'application/json','HTTP_X_RAZORPAY_SIGNATURE':signature,'HTTP_X_RAZORPAY_EVENT_ID':'evt_capture_1'}
         first = self.client.generic('POST','/api/payments/razorpay/webhook/',data=body,**headers)
