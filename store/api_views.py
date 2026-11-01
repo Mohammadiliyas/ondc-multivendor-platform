@@ -8,7 +8,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from .models import Vendor, Category, Product, Order, OrderItem, InventoryMovement, AuditLog, VendorFulfillment
-from .serializers import RegisterSerializer, VendorSerializer, CategorySerializer, ProductSerializer, CreateOrderSerializer, OrderSerializer
+from .serializers import RegisterSerializer, VendorSerializer, CategorySerializer, ProductSerializer, CreateOrderSerializer, OrderSerializer, VendorFulfillmentSerializer
 
 class RegisterView(generics.CreateAPIView):
     queryset = User.objects.all()
