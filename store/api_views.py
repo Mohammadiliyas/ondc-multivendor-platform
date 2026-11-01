@@ -186,8 +186,8 @@ class VerifySignupOTPView(APIView):
                 _issue_signup_otps(user, enforce_cooldown=False, channels=['email'])
             except Exception:
                 return Response({'detail': 'Mobile verified, but email OTP delivery failed. Use resend to retry email verification.'}, status=503)
-            return Response({'detail': 'Mobile verified. We have now sent an OTP to your email address. Verify your email to activate the account.'})
-        return Response({'detail': 'Mobile and email verified. Your account is active. Sign in using your mobile number and password.'})
+            return Response({'detail': 'Mobile verified. We have now sent an OTP to your email address. Verify your email to activate the account.', 'next_step': 'email'})
+        return Response({'detail': 'Mobile and email verified. Your account is active. Sign in using your mobile number and password.', 'verified': True})
 
 
 
