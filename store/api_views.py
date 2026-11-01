@@ -257,6 +257,8 @@ class AdminOrderStatusView(APIView):
                     InventoryMovement.objects.create(product=product, quantity_delta=item.quantity, reason=f'Admin cancellation {order.id}')
             order.status = new_status
             order.save(update_fields=['status'])
+            if new_status == Order.Status.CANCELLED:
+                order.vendor_fulfillments.update(status=VendorFulfillment.Status.CANCELLED)
             AuditLog.objects.create(actor=request.user, action='admin.order_status_changed', object_type='Order', object_id=str(order.pk), details={'from': old_status, 'to': new_status})
         return Response(OrderSerializer(order).data)
 
