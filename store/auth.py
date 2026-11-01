@@ -1,6 +1,4 @@
-from django.contrib.auth import get_user_model
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from rest_framework.exceptions import AuthenticationFailed
 
 class VerifiedTokenObtainPairSerializer(TokenObtainPairSerializer):
     @classmethod
@@ -13,8 +11,10 @@ class VerifiedTokenObtainPairSerializer(TokenObtainPairSerializer):
         if mobile:
             from .models import UserVerification
             verification = UserVerification.objects.select_related('user').filter(phone=mobile).first()
-            if verification:
-                attrs['username'] = verification.user.username
+            if not verification or not verification.phone_verified:
+                from rest_framework.exceptions import AuthenticationFailed
+                raise AuthenticationFailed('No verified account was found for this mobile number.')
+            attrs['username'] = verification.user.username
         data = super().validate(attrs)
         user = self.user
         try:
