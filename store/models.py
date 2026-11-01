@@ -19,6 +19,7 @@ class Product(models.Model):
     category = models.ForeignKey(Category, on_delete=models.SET_NULL, null=True, blank=True, related_name='products')
     name = models.CharField(max_length=180)
     description = models.TextField(blank=True)
+    image_url = models.URLField(max_length=500, blank=True)
     sku = models.CharField(max_length=80, unique=True)
     price = models.DecimalField(max_digits=12, decimal_places=2)
     stock = models.PositiveIntegerField(default=0)
