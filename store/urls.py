@@ -1,8 +1,12 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
+from .auth import VerifiedTokenObtainPairSerializer
 from . import views
 from .api_views import RegisterView, VerifySignupOTPView, ResendSignupOTPView, CategoryViewSet, ProductViewSet, VendorViewSet, VendorDashboardView, VendorOrderListView, OrderCreateView, OrderListView, OrderCancelView, VendorOrderStatusView, AdminDashboardView, AdminOrderStatusView, AdminAuditLogView, VendorFulfillmentListView, VendorFulfillmentStatusView, RazorpayCreateOrderView, RazorpayVerifyPaymentView, RazorpayWebhookView, AdminCreateRefundView, VendorSettlementListView, AdminMarkSettlementPaidView, AdminCreateRefundView, VendorSettlementListView, AdminMarkSettlementPaidView
+
+class VerifiedTokenObtainPairView(TokenObtainPairView):
+    serializer_class = VerifiedTokenObtainPairSerializer
 
 router = DefaultRouter()
 router.register('categories', CategoryViewSet, basename='category')
@@ -13,7 +17,7 @@ urlpatterns = [
     path('auth/register/', RegisterView.as_view(), name='register'),
     path('auth/verify-otp/', VerifySignupOTPView.as_view(), name='verify-signup-otp'),
     path('auth/resend-otp/', ResendSignupOTPView.as_view(), name='resend-signup-otp'),
-    path('token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
+    path('token/', VerifiedTokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
     path('dashboard/vendor/', VendorDashboardView.as_view(), name='vendor-dashboard'),
     path('admin/dashboard/', AdminDashboardView.as_view(), name='admin-dashboard'),
