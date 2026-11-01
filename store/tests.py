@@ -346,3 +346,38 @@ class MarketplaceAPITests(TestCase):
         payment.refresh_from_db()
         self.assertEqual(refund.status, RefundRecord.Status.PROCESSED)
         self.assertEqual(payment.status, PaymentRecord.Status.REFUNDED)
+
+
+    @override_settings(PLATFORM_COMMISSION_PERCENT='10')
+    def test_delivery_creates_vendor_settlement_ledger(self):
+        order = self._create_order_for_payment('settlement-on-delivery')
+        payment = PaymentRecord.objects.create(order_id=order.data['id'], status=PaymentRecord.Status.PAID, amount='25.00', razorpay_order_id='order_settlement')
+        fulfillment = VendorFulfillment.objects.get(order_id=order.data['id'], vendor=self.vendor)
+        fulfillment.status = VendorFulfillment.Status.SHIPPED
+        fulfillment.save(update_fields=['status'])
+        self.auth(self.seller)
+        response = self.client.patch(f'/api/vendor/fulfillments/{fulfillment.pk}/status/', {'status':'DELIVERED'}, format='json')
+        self.assertEqual(response.status_code, 200)
+        settlement = VendorSettlement.objects.get(order_id=order.data['id'], vendor=self.vendor)
+        self.assertEqual(str(settlement.gross_amount), '25.00')
+        self.assertEqual(str(settlement.platform_fee), '2.50')
+        self.assertEqual(str(settlement.net_amount), '22.50')
+        self.assertEqual(settlement.status, VendorSettlement.Status.READY)
+
+    def test_vendor_sees_only_own_settlements(self):
+        order = self._create_order_for_payment('settlement-visibility')
+        VendorSettlement.objects.create(order_id=order.data['id'], vendor=self.vendor, gross_amount='25.00', platform_fee='2.50', net_amount='22.50')
+        self.auth(self.seller)
+        response = self.client.get('/api/vendor/settlements/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data[0]['vendor_id'], self.vendor.pk)
+
+    def test_admin_cannot_mark_settlement_paid_without_transfer_reference(self):
+        order = self._create_order_for_payment('settlement-reference-required')
+        settlement = VendorSettlement.objects.create(order_id=order.data['id'], vendor=self.vendor, gross_amount='25.00', platform_fee='2.50', net_amount='22.50', status=VendorSettlement.Status.READY)
+        self.auth(self.admin)
+        response = self.client.post(f'/api/admin/settlements/{settlement.pk}/mark-paid/', {}, format='json')
+        self.assertEqual(response.status_code, 400)
+        settlement.refresh_from_db()
+        self.assertEqual(settlement.status, VendorSettlement.Status.READY)
