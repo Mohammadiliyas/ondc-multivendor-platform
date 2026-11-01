@@ -129,8 +129,8 @@ class VerifySignupOTPView(APIView):
         username = str(request.data.get('username', '')).strip()
         email_code = str(request.data.get('email_otp', '')).strip()
         sms_code = str(request.data.get('sms_otp', '')).strip()
-        if not username or not email_code or not sms_code:
-            raise ValidationError({'detail': 'Username, email_otp and sms_otp are all required.'})
+        if not username:
+            raise ValidationError({'detail': 'Username is required.'})
         user = User.objects.filter(username=username, is_active=False).first()
         if not user:
             return Response({'detail': 'Pending signup account not found.'}, status=404)
@@ -140,6 +140,11 @@ class VerifySignupOTPView(APIView):
         errors = {}
         with transaction.atomic():
             for channel, supplied in (('email', email_code), ('sms', sms_code)):
+                if (channel == 'email' and verification.email_verified) or (channel == 'sms' and verification.phone_verified):
+                    continue
+                if not supplied:
+                    errors[channel] = 'OTP is required.'
+                    continue
                 challenge = SignupOTP.objects.select_for_update().filter(
                     user=user, channel=channel, verified_at__isnull=True
                 ).order_by('-created_at').first()
