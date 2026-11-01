@@ -159,3 +159,29 @@ class VendorSettlement(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     class Meta:
         constraints = [models.UniqueConstraint(fields=['order', 'vendor'], name='unique_order_vendor_settlement')]
+
+
+class UserVerification(models.Model):
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='verification')
+    phone = models.CharField(max_length=20, unique=True)
+    email_verified = models.BooleanField(default=False)
+    phone_verified = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    @property
+    def is_verified(self):
+        return self.email_verified and self.phone_verified
+
+
+class SignupOTP(models.Model):
+    CHANNEL_CHOICES = [('email', 'Email'), ('sms', 'SMS')]
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='signup_otps')
+    channel = models.CharField(max_length=8, choices=CHANNEL_CHOICES)
+    code_hash = models.CharField(max_length=128)
+    expires_at = models.DateTimeField()
+    attempts = models.PositiveSmallIntegerField(default=0)
+    verified_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [models.Index(fields=['user', 'channel', '-created_at'])]
