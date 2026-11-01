@@ -1,7 +1,9 @@
-from django.test import TestCase
+from django.test import TestCase, override_settings
+from unittest.mock import patch
+import hashlib, hmac, json
 from django.contrib.auth.models import User
 from rest_framework.test import APIClient
-from .models import Vendor, Category, Product, Order, OrderItem, InventoryMovement, VendorFulfillment
+from .models import Vendor, Category, Product, Order, OrderItem, InventoryMovement, VendorFulfillment, PaymentRecord, PaymentWebhookEvent
 
 class MarketplaceAPITests(TestCase):
     def setUp(self):
@@ -195,3 +197,71 @@ class MarketplaceAPITests(TestCase):
         self.assertEqual(denied.status_code, 409)
         self.product.refresh_from_db()
         self.assertEqual(self.product.stock, 4)
+
+
+    def _create_order_for_payment(self, key='payment-test-order'):
+        self.auth(self.buyer)
+        return self.client.post('/api/orders/create/', {
+            'shipping_address':'12 Main Road, Hyderabad',
+            'idempotency_key':key,
+            'items':[{'product_id':self.product.pk,'quantity':2}]
+        }, format='json')
+
+    @override_settings(RAZORPAY_KEY_ID='', RAZORPAY_KEY_SECRET='')
+    def test_razorpay_checkout_requires_server_credentials(self):
+        order = self._create_order_for_payment()
+        response = self.client.post(f'/api/orders/{order.data["id"]}/payments/razorpay/')
+        self.assertEqual(response.status_code, 503)
+
+    @override_settings(RAZORPAY_KEY_ID='rzp_test_demo', RAZORPAY_KEY_SECRET='test_secret')
+    @patch('store.api_views.razorpay.Client')
+    def test_razorpay_order_uses_server_calculated_amount(self, client_class):
+        order = self._create_order_for_payment('payment-amount-test')
+        client_class.return_value.order.create.return_value = {'id':'order_test_123'}
+        response = self.client.post(f'/api/orders/{order.data["id"]}/payments/razorpay/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['amount'], 2500)
+        self.assertEqual(response.data['currency'], 'INR')
+        payment = PaymentRecord.objects.get(order_id=order.data['id'])
+        self.assertEqual(payment.razorpay_order_id, 'order_test_123')
+        self.assertEqual(str(payment.amount), '25.00')
+        client_class.return_value.order.create.assert_called_once()
+
+    @override_settings(RAZORPAY_KEY_ID='rzp_test_demo', RAZORPAY_KEY_SECRET='test_secret')
+    def test_razorpay_verification_rejects_invalid_signature(self):
+        order = self._create_order_for_payment('payment-bad-signature')
+        PaymentRecord.objects.create(order_id=order.data['id'], amount='25.00', razorpay_order_id='order_bad_sig')
+        response = self.client.post('/api/payments/razorpay/verify/', {
+            'razorpay_order_id':'order_bad_sig',
+            'razorpay_payment_id':'pay_fake',
+            'razorpay_signature':'not-a-valid-signature'
+        }, format='json')
+        self.assertEqual(response.status_code, 400)
+
+    @override_settings(RAZORPAY_WEBHOOK_SECRET='webhook_test_secret')
+    def test_razorpay_webhook_requires_valid_signature(self):
+        response = self.client.generic(
+            'POST', '/api/payments/razorpay/webhook/', data=b'{"event":"payment.captured"}',
+            content_type='application/json',
+            HTTP_X_RAZORPAY_SIGNATURE='bad-signature',
+            HTTP_X_RAZORPAY_EVENT_ID='evt_bad'
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(PaymentWebhookEvent.objects.count(), 0)
+
+    @override_settings(RAZORPAY_WEBHOOK_SECRET='webhook_test_secret')
+    def test_razorpay_captured_webhook_is_signed_and_idempotent(self):
+        order = self._create_order_for_payment('payment-webhook-captured')
+        payment = PaymentRecord.objects.create(order_id=order.data['id'], amount='25.00', razorpay_order_id='order_webhook')
+        body = json.dumps({'event':'payment.captured','payload':{'payment':{'entity':{'id':'pay_captured','order_id':'order_webhook'}}}}).encode()
+        signature = hmac.new(b'webhook_test_secret', body, hashlib.sha256).hexdigest()
+        headers = {'content_type':'application/json','HTTP_X_RAZORPAY_SIGNATURE':signature,'HTTP_X_RAZORPAY_EVENT_ID':'evt_capture_1'}
+        first = self.client.generic('POST','/api/payments/razorpay/webhook/',data=body,**headers)
+        self.assertEqual(first.status_code, 200)
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, PaymentRecord.Status.PAID)
+        self.assertEqual(payment.razorpay_payment_id, 'pay_captured')
+        self.assertEqual(Order.objects.get(pk=order.data['id']).status, Order.Status.CONFIRMED)
+        second = self.client.generic('POST','/api/payments/razorpay/webhook/',data=body,**headers)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(PaymentWebhookEvent.objects.count(), 1)
