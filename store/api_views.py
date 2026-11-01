@@ -313,6 +313,8 @@ class VendorFulfillmentStatusView(APIView):
             if new_status == VendorFulfillment.Status.DELIVERED:
                 vendor_gross = sum((item.unit_price * item.quantity for item in fulfillment.order.items.filter(product__vendor=vendor)), start=Decimal('0.00')).quantize(Decimal('0.01'))
                 fee_rate = Decimal(str(getattr(settings, 'PLATFORM_COMMISSION_PERCENT', 10)))
+                if fee_rate < Decimal('0') or fee_rate > Decimal('100'):
+                    raise ValidationError({'commission':'PLATFORM_COMMISSION_PERCENT must be between 0 and 100.'})
                 fee = (vendor_gross * fee_rate / Decimal('100')).quantize(Decimal('0.01'))
                 has_refund = fulfillment.order.payments.filter(refunds__status=RefundRecord.Status.PROCESSED).exists()
                 VendorSettlement.objects.get_or_create(
