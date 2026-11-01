@@ -2,7 +2,7 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from . import views
-from .api_views import RegisterView, CategoryViewSet, ProductViewSet, VendorViewSet, VendorDashboardView, VendorOrderListView, OrderCreateView, OrderListView, OrderCancelView, VendorOrderStatusView, AdminDashboardView, AdminOrderStatusView, AdminAuditLogView, VendorFulfillmentListView, VendorFulfillmentStatusView, RazorpayCreateOrderView, RazorpayVerifyPaymentView, RazorpayWebhookView
+from .api_views import RegisterView, CategoryViewSet, ProductViewSet, VendorViewSet, VendorDashboardView, VendorOrderListView, OrderCreateView, OrderListView, OrderCancelView, VendorOrderStatusView, AdminDashboardView, AdminOrderStatusView, AdminAuditLogView, VendorFulfillmentListView, VendorFulfillmentStatusView, RazorpayCreateOrderView, RazorpayVerifyPaymentView, RazorpayWebhookView, AdminCreateRefundView, VendorSettlementListView, AdminMarkSettlementPaidView
 
 router = DefaultRouter()
 router.register('categories', CategoryViewSet, basename='category')
@@ -25,6 +25,9 @@ urlpatterns = [
     path('orders/<int:pk>/payments/razorpay/', RazorpayCreateOrderView.as_view(), name='razorpay-create-order'),
     path('payments/razorpay/verify/', RazorpayVerifyPaymentView.as_view(), name='razorpay-verify'),
     path('payments/razorpay/webhook/', RazorpayWebhookView.as_view(), name='razorpay-webhook'),
+    path('admin/payments/<int:payment_id>/refund/', AdminCreateRefundView.as_view(), name='admin-payment-refund'),
+    path('vendor/settlements/', VendorSettlementListView.as_view(), name='vendor-settlements'),
+    path('admin/settlements/<int:pk>/mark-paid/', AdminMarkSettlementPaidView.as_view(), name='admin-settlement-mark-paid'),
     path('orders/', OrderListView.as_view(), name='order-list'),
     path('orders/<int:pk>/cancel/', OrderCancelView.as_view(), name='order-cancel'),
     path('', include(router.urls)),
