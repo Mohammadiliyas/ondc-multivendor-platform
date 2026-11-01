@@ -7,7 +7,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.exceptions import PermissionDenied, ValidationError
-from .models import Vendor, Category, Product, Order, OrderItem, InventoryMovement, AuditLog
+from .models import Vendor, Category, Product, Order, OrderItem, InventoryMovement, AuditLog, VendorFulfillment
 from .serializers import RegisterSerializer, VendorSerializer, CategorySerializer, ProductSerializer, CreateOrderSerializer, OrderSerializer
 
 class RegisterView(generics.CreateAPIView):
@@ -131,7 +131,7 @@ class OrderCreateView(APIView):
                 product.save(update_fields=['stock', 'updated_at'])
                 OrderItem.objects.create(order=order, product=product, product_name=product.name, unit_price=product.price, quantity=line['quantity'])
                 InventoryMovement.objects.create(product=product, quantity_delta=-line['quantity'], reason=f'Order {order.id}')
-            AuditLog.objects.create(actor=request.user, action='order.placed', object_type='Order', object_id=str(order.pk))
+            vendor_ids = order.items.values_list('product__vendor_id', flat=True).distinct()\n            for vendor_id in vendor_ids:\n                VendorFulfillment.objects.create(order=order, vendor_id=vendor_id)\n            AuditLog.objects.create(actor=request.user, action='order.placed', object_type='Order', object_id=str(order.pk))
         return Response(OrderSerializer(order).data, status=status.HTTP_201_CREATED)
 
 class OrderListView(generics.ListAPIView):
@@ -248,3 +248,54 @@ class AdminAuditLogView(generics.ListAPIView):
     def list(self, request, *args, **kwargs):
         qs = self.get_queryset()[:100]
         return Response([{'id':x.id,'actor':x.actor.username if x.actor else None,'action':x.action,'object_type':x.object_type,'object_id':x.object_id,'details':x.details,'created_at':x.created_at} for x in qs])
+
+
+class VendorFulfillmentListView(generics.ListAPIView):
+    serializer_class = VendorFulfillmentSerializer
+    permission_classes = [IsAuthenticated]
+    def get_queryset(self):
+        vendor = getattr(self.request.user, 'vendor_profile', None)
+        if not vendor or vendor.is_suspended or not vendor.is_approved:
+            raise PermissionDenied('An approved, active vendor account is required.')
+        return VendorFulfillment.objects.filter(vendor=vendor).select_related('order','order__buyer','vendor').prefetch_related('order__items').order_by('-created_at')
+
+class VendorFulfillmentStatusView(APIView):
+    permission_classes = [IsAuthenticated]
+    transitions = {
+        VendorFulfillment.Status.PENDING: {VendorFulfillment.Status.CONFIRMED, VendorFulfillment.Status.CANCELLED},
+        VendorFulfillment.Status.CONFIRMED: {VendorFulfillment.Status.PACKED, VendorFulfillment.Status.CANCELLED},
+        VendorFulfillment.Status.PACKED: {VendorFulfillment.Status.SHIPPED},
+        VendorFulfillment.Status.SHIPPED: {VendorFulfillment.Status.DELIVERED},
+    }
+    def patch(self, request, pk):
+        vendor = getattr(request.user, 'vendor_profile', None)
+        if not vendor or vendor.is_suspended or not vendor.is_approved:
+            raise PermissionDenied('An approved, active vendor account is required.')
+        new_status = request.data.get('status')
+        if new_status not in VendorFulfillment.Status.values:
+            raise ValidationError({'status': 'Invalid fulfillment status.'})
+        with transaction.atomic():
+            try:
+                fulfillment = VendorFulfillment.objects.select_for_update().select_related('order','vendor').get(pk=pk, vendor=vendor)
+            except VendorFulfillment.DoesNotExist:
+                return Response({'detail': 'Fulfillment not found.'}, status=404)
+            if new_status not in self.transitions.get(fulfillment.status, set()):
+                return Response({'detail': f'Invalid transition: {fulfillment.status} to {new_status}.'}, status=409)
+            if new_status == VendorFulfillment.Status.CANCELLED:
+                return Response({'detail': 'Contact platform support to cancel an individual vendor shipment. Buyer cancellation is handled at order level.'}, status=409)
+            fulfillment.status = new_status
+            if 'tracking_reference' in request.data:
+                fulfillment.tracking_reference = str(request.data['tracking_reference'])[:180]
+            fulfillment.save(update_fields=['status','tracking_reference','updated_at'])
+            rows = list(fulfillment.order.vendor_fulfillments.values_list('status', flat=True))
+            if rows and all(value == VendorFulfillment.Status.DELIVERED for value in rows):
+                fulfillment.order.status = Order.Status.DELIVERED
+            elif rows and all(value in [VendorFulfillment.Status.SHIPPED, VendorFulfillment.Status.DELIVERED] for value in rows):
+                fulfillment.order.status = Order.Status.SHIPPED
+            elif rows and all(value in [VendorFulfillment.Status.PACKED, VendorFulfillment.Status.SHIPPED, VendorFulfillment.Status.DELIVERED] for value in rows):
+                fulfillment.order.status = Order.Status.PACKED
+            elif rows and all(value in [VendorFulfillment.Status.CONFIRMED, VendorFulfillment.Status.PACKED, VendorFulfillment.Status.SHIPPED, VendorFulfillment.Status.DELIVERED] for value in rows):
+                fulfillment.order.status = Order.Status.CONFIRMED
+            fulfillment.order.save(update_fields=['status'])
+            AuditLog.objects.create(actor=request.user, action='vendor.fulfillment_status_changed', object_type='VendorFulfillment', object_id=str(fulfillment.pk), details={'status':new_status,'order_id':fulfillment.order_id})
+        return Response(VendorFulfillmentSerializer(fulfillment).data)
