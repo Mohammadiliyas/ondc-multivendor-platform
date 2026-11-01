@@ -8,6 +8,7 @@ class RegisterSerializer(serializers.ModelSerializer):
     email = serializers.EmailField(required=True)
     password = serializers.CharField(write_only=True, validators=[validate_password])
     phone = serializers.CharField(write_only=True, max_length=20)
+    username = serializers.CharField(required=False, allow_blank=True)
     class Meta:
         model = User
         fields = ('id', 'username', 'email', 'password', 'phone')
@@ -27,7 +28,15 @@ class RegisterSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         from .models import UserVerification
         phone = validated_data.pop('phone')
-        user = User.objects.create_user(is_active=False, **validated_data)
+        supplied_username = (validated_data.pop('username', '') or '').strip()
+        if not supplied_username:
+            base = 'ml_' + ''.join(ch for ch in phone if ch.isdigit())
+            supplied_username = base
+            suffix = 1
+            while User.objects.filter(username=supplied_username).exists():
+                supplied_username = f'{base}_{suffix}'
+                suffix += 1
+        user = User.objects.create_user(username=supplied_username, is_active=False, **validated_data)
         UserVerification.objects.create(user=user, phone=phone)
         return user
 
