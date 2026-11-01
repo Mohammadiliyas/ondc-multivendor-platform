@@ -1,10 +1,14 @@
 from django.http import JsonResponse
+from django.shortcuts import render
 from django.views.decorators.http import require_GET
 from .models import Product
 
+def home(request):
+    return render(request, 'index.html')
+
 @require_GET
 def catalog(request):
-    qs = Product.objects.filter(is_active=True, vendor__is_approved=True).select_related('vendor', 'category')
+    qs = Product.objects.filter(is_active=True, vendor__is_approved=True, vendor__is_suspended=False).select_related('vendor', 'category')
     search = request.GET.get('search', '').strip()
     if search:
         qs = qs.filter(name__icontains=search)
@@ -14,6 +18,6 @@ def catalog(request):
 @require_GET
 def ondc_catalog(request):
     # Mock catalog mapping only. This endpoint is not a production ONDC/Beckn implementation.
-    products = Product.objects.filter(is_active=True, vendor__is_approved=True).select_related('vendor', 'category')
+    products = Product.objects.filter(is_active=True, vendor__is_approved=True, vendor__is_suspended=False).select_related('vendor', 'category')
     items = [{'id': str(p.id), 'descriptor': {'name': p.name, 'short_desc': p.description[:300]}, 'price': {'currency': 'INR', 'value': str(p.price)}, 'quantity': {'available': {'count': str(p.stock)}}, 'provider': {'id': str(p.vendor_id), 'descriptor': {'name': p.vendor.store_name}}} for p in products]
     return JsonResponse({'context': {'domain': 'ONDC:RET10', 'action': 'search', 'mode': 'mock'}, 'message': {'catalog': {'bpp/descriptor': {'name': 'Demo Multi-Vendor Marketplace'}, 'bpp/providers': items}}})
