@@ -2,7 +2,7 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from . import views
-from .api_views import RegisterView, CategoryViewSet, ProductViewSet, VendorViewSet, OrderCreateView, OrderListView
+from .api_views import RegisterView, CategoryViewSet, ProductViewSet, VendorViewSet, VendorDashboardView, VendorOrderListView, OrderCreateView, OrderListView, OrderCancelView, VendorOrderStatusView
 
 router = DefaultRouter()
 router.register('categories', CategoryViewSet, basename='category')
@@ -13,8 +13,12 @@ urlpatterns = [
     path('auth/register/', RegisterView.as_view(), name='register'),
     path('token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+    path('dashboard/vendor/', VendorDashboardView.as_view(), name='vendor-dashboard'),
+    path('vendor/orders/', VendorOrderListView.as_view(), name='vendor-orders'),
+    path('vendor/orders/<int:pk>/status/', VendorOrderStatusView.as_view(), name='vendor-order-status'),
     path('orders/create/', OrderCreateView.as_view(), name='order-create'),
     path('orders/', OrderListView.as_view(), name='order-list'),
+    path('orders/<int:pk>/cancel/', OrderCancelView.as_view(), name='order-cancel'),
     path('', include(router.urls)),
     path('catalog/', views.catalog, name='catalog'),
     path('ondc/catalog/', views.ondc_catalog, name='ondc-catalog'),
