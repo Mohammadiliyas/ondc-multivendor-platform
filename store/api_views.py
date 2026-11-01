@@ -225,7 +225,7 @@ class AdminDashboardView(APIView):
             'active_products': Product.objects.filter(is_active=True).count(),
             'orders': Order.objects.count(),
             'orders_open': Order.objects.exclude(status__in=[Order.Status.DELIVERED, Order.Status.CANCELLED]).count(),
-            'payments_captured_inr': str(PaymentRecord.objects.filter(status=PaymentRecord.Status.PAID).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')),
+            'payments_captured_inr': str(PaymentRecord.objects.filter(status__in=[PaymentRecord.Status.PAID, PaymentRecord.Status.REFUNDED]).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')),
             'refunds_processed_inr': str(RefundRecord.objects.filter(status=RefundRecord.Status.PROCESSED).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')),
             'settlements_ready_count': VendorSettlement.objects.filter(status=VendorSettlement.Status.READY).count(),
             'settlements_held_count': VendorSettlement.objects.filter(status=VendorSettlement.Status.HELD).count(),
