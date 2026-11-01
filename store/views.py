@@ -12,7 +12,7 @@ def catalog(request):
     search = request.GET.get('search', '').strip()
     if search:
         qs = qs.filter(name__icontains=search)
-    data = [{'id': p.id, 'name': p.name, 'description': p.description, 'sku': p.sku, 'price': str(p.price), 'stock': p.stock, 'category': p.category.name if p.category_id else None, 'vendor': p.vendor.store_name} for p in qs]
+    data = [{'id': p.id, 'name': p.name, 'description': p.description, 'image_url': p.image_url, 'sku': p.sku, 'price': str(p.price), 'stock': p.stock, 'category': p.category.name if p.category_id else None, 'vendor': p.vendor.store_name} for p in qs]
     return JsonResponse({'results': data})
 
 @require_GET
