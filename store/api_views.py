@@ -225,6 +225,11 @@ class AdminDashboardView(APIView):
             'active_products': Product.objects.filter(is_active=True).count(),
             'orders': Order.objects.count(),
             'orders_open': Order.objects.exclude(status__in=[Order.Status.DELIVERED, Order.Status.CANCELLED]).count(),
+            'payments_captured_inr': str(PaymentRecord.objects.filter(status=PaymentRecord.Status.PAID).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')),
+            'refunds_processed_inr': str(RefundRecord.objects.filter(status=RefundRecord.Status.PROCESSED).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')),
+            'settlements_ready_count': VendorSettlement.objects.filter(status=VendorSettlement.Status.READY).count(),
+            'settlements_held_count': VendorSettlement.objects.filter(status=VendorSettlement.Status.HELD).count(),
+            'settlements_paid_inr': str(VendorSettlement.objects.filter(status=VendorSettlement.Status.PAID).aggregate(total=Sum('net_amount'))['total'] or Decimal('0.00')),
             'recent_audit': list(AuditLog.objects.select_related('actor').order_by('-created_at').values('id','actor__username','action','object_type','object_id','created_at')[:12]),
         })
 
