@@ -1,14 +1,33 @@
 from django.contrib.auth.models import User
 from rest_framework import serializers
+from django.contrib.auth.password_validation import validate_password
 from .models import Vendor, Category, Product, Order, OrderItem, VendorFulfillment, PaymentRecord
 
 class RegisterSerializer(serializers.ModelSerializer):
-    password = serializers.CharField(write_only=True, min_length=8)
+    password = serializers.CharField(write_only=True, validators=[validate_password])
+    phone = serializers.CharField(write_only=True, max_length=20)
     class Meta:
         model = User
-        fields = ('id', 'username', 'email', 'password')
+        fields = ('id', 'username', 'email', 'password', 'phone')
+    def validate_email(self, value):
+        value = value.strip().lower()
+        if not value or User.objects.filter(email__iexact=value).exists():
+            raise serializers.ValidationError('A unique email address is required.')
+        return value
+    def validate_phone(self, value):
+        value = ''.join(ch for ch in value if ch.isdigit() or ch == '+')
+        if not value.startswith('+') or len(value) < 10 or len(value) > 16:
+            raise serializers.ValidationError('Enter a phone number in international format, e.g. +919876543210.')
+        from .models import UserVerification
+        if UserVerification.objects.filter(phone=value).exists():
+            raise serializers.ValidationError('This phone number is already registered.')
+        return value
     def create(self, validated_data):
-        return User.objects.create_user(**validated_data)
+        from .models import UserVerification
+        phone = validated_data.pop('phone')
+        user = User.objects.create_user(is_active=False, **validated_data)
+        UserVerification.objects.create(user=user, phone=phone)
+        return user
 
 class VendorSerializer(serializers.ModelSerializer):
     owner_username = serializers.CharField(source='owner.username', read_only=True)
