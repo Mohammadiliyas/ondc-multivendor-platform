@@ -156,6 +156,8 @@ class OrderCancelView(APIView):
                 raise PermissionDenied('You cannot cancel this order.')
             if order.status not in (Order.Status.PLACED, Order.Status.CONFIRMED):
                 return Response({'detail': 'Only placed or confirmed orders can be cancelled.'}, status=409)
+            if order.vendor_fulfillments.exclude(status__in=[VendorFulfillment.Status.PENDING, VendorFulfillment.Status.CONFIRMED]).exists():
+                return Response({'detail': 'Cancellation is blocked because at least one vendor has started packing or shipping.'}, status=409)
             for item in order.items.select_related('product').all():
                 product = Product.objects.select_for_update().get(pk=item.product_id)
                 product.stock += item.quantity
@@ -195,8 +197,8 @@ class VendorOrderStatusView(APIView):
                 return Response({'detail': 'Multi-vendor orders require vendor-specific fulfillment before global status changes.'}, status=409)
             order.status = new_status
             order.save(update_fields=['status'])
-            if new_status == Order.Status.CANCELLED:
-                order.vendor_fulfillments.update(status=VendorFulfillment.Status.CANCELLED)
+            status_map = {Order.Status.PLACED: VendorFulfillment.Status.PENDING, Order.Status.CONFIRMED: VendorFulfillment.Status.CONFIRMED, Order.Status.PACKED: VendorFulfillment.Status.PACKED, Order.Status.SHIPPED: VendorFulfillment.Status.SHIPPED, Order.Status.DELIVERED: VendorFulfillment.Status.DELIVERED, Order.Status.CANCELLED: VendorFulfillment.Status.CANCELLED}
+            order.vendor_fulfillments.update(status=status_map[new_status])
             AuditLog.objects.create(actor=request.user, action='order.status_changed', object_type='Order', object_id=str(order.pk), details={'status': new_status})
         return Response(OrderSerializer(order).data)
 
@@ -237,6 +239,8 @@ class AdminOrderStatusView(APIView):
             if old_status == Order.Status.DELIVERED and new_status != Order.Status.DELIVERED:
                 return Response({'detail': 'Delivered orders cannot be moved backwards.'}, status=409)
             if new_status == Order.Status.CANCELLED and old_status != Order.Status.CANCELLED:
+                if order.vendor_fulfillments.exclude(status__in=[VendorFulfillment.Status.PENDING, VendorFulfillment.Status.CONFIRMED]).exists():
+                    return Response({'detail': 'Cancellation is blocked because a vendor has started packing or shipping.'}, status=409)
                 for item in order.items.all():
                     product = Product.objects.select_for_update().get(pk=item.product_id)
                     product.stock += item.quantity
