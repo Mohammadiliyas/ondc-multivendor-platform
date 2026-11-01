@@ -59,7 +59,7 @@ def _deliver_signup_otp(user, channel, code):
         raise RuntimeError('SMS OTP delivery failed. Check MSG91 configuration.') from exc
 
 
-def _issue_signup_otps(user, enforce_cooldown=True):
+def _issue_signup_otps(user, enforce_cooldown=True, channels=None):
     if SignupOTP.objects.filter(user=user, created_at__gte=timezone.now() - timedelta(hours=24)).count() >= 10:
         raise ValidationError({'detail': 'OTP request limit reached. Try again after 24 hours.'})
     latest = {}
@@ -70,7 +70,9 @@ def _issue_signup_otps(user, enforce_cooldown=True):
         wait = settings.OTP_RESEND_SECONDS - int((timezone.now() - recent).total_seconds())
         if wait > 0:
             raise ValidationError({'detail': f'Wait {wait} seconds before requesting new OTPs.'})
-    codes = {'email': f'{secrets.randbelow(1000000):06d}', 'sms': f'{secrets.randbelow(1000000):06d}'}
+    if channels is None:
+        channels = ['sms'] if not user.verification.phone_verified else ['email']
+    codes = {channel: f'{secrets.randbelow(1000000):06d}' for channel in channels}
     expires = timezone.now() + timedelta(minutes=settings.OTP_EXPIRY_MINUTES)
     with transaction.atomic():
         for channel, code in codes.items():
@@ -102,7 +104,7 @@ class RegisterView(generics.GenericAPIView):
                 'username': user.username,
             }, status=503)
         return Response({
-            'detail': 'Separate verification codes were sent to your email address and mobile number. Both are required.',
+            'detail': 'Mobile verification code sent. Verify your mobile number first; email verification comes next.',
             'username': user.username,
             'expires_in_seconds': settings.OTP_EXPIRY_MINUTES * 60,
         }, status=status.HTTP_201_CREATED)
@@ -123,7 +125,7 @@ class ResendSignupOTPView(APIView):
             raise
         except Exception as exc:
             return Response({'detail': 'OTP delivery failed. Check email/SMS provider configuration.', 'delivery_error': str(exc)}, status=503)
-        return Response({'detail': 'New email and SMS OTPs sent.', 'expires_in_seconds': settings.OTP_EXPIRY_MINUTES * 60})
+        return Response({'detail': 'A new verification OTP has been sent to the next required channel.', 'expires_in_seconds': settings.OTP_EXPIRY_MINUTES * 60})
 
 
 class VerifySignupOTPView(APIView):
@@ -142,7 +144,8 @@ class VerifySignupOTPView(APIView):
             return Response({'detail': 'Signup verification record not found.'}, status=400)
         errors = {}
         with transaction.atomic():
-            for channel, supplied in (('email', email_code), ('sms', sms_code)):
+            required_channel = 'sms' if not verification.phone_verified else 'email'
+            for channel, supplied in ((required_channel, sms_code if required_channel == 'sms' else email_code),):
                 if (channel == 'email' and verification.email_verified) or (channel == 'sms' and verification.phone_verified):
                     continue
                 if not supplied:
@@ -171,10 +174,20 @@ class VerifySignupOTPView(APIView):
             verification.save(update_fields=['email_verified', 'phone_verified'])
             if errors:
                 return Response({'detail': 'One or both OTPs could not be verified.', 'errors': errors}, status=400)
+            if verification.phone_verified and not verification.email_verified:
+                next_channel = 'email'
+            else:
+                next_channel = None
             if verification.is_verified:
                 user.is_active = True
                 user.save(update_fields=['is_active'])
-        return Response({'detail': 'Email and mobile number verified. Your account is active. You can now sign in.'})
+        if next_channel == 'email':
+            try:
+                _issue_signup_otps(user, enforce_cooldown=False, channels=['email'])
+            except Exception:
+                return Response({'detail': 'Mobile verified, but email OTP delivery failed. Use resend to retry email verification.'}, status=503)
+            return Response({'detail': 'Mobile verified. We have now sent an OTP to your email address. Verify your email to activate the account.'})
+        return Response({'detail': 'Mobile and email verified. Your account is active. Sign in using your mobile number and password.'})
 
 
 
